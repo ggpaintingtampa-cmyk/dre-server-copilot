@@ -1,0 +1,152 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 2.0.0
+  description: DRE Server Copilot API
+servers:
+  - url: /api
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      summary: Safe infrastructure health check
+      responses:
+        "200":
+          description: Health response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthStatus" }
+  /status:
+    get:
+      operationId: getServerStatus
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { description: Protected operational status, content: { application/json: { schema: { $ref: "#/components/schemas/ServerStatus" } } } }
+  /agent/session/new:
+    post:
+      operationId: createAgentSession
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { description: New session, content: { application/json: { schema: { $ref: "#/components/schemas/NewSessionResponse" } } } }
+  /agent/history:
+    get:
+      operationId: getAgentHistory
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { description: Session history, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AgentMessage" } } } } }
+  /agent/chat:
+    post:
+      operationId: sendAgentMessage
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AgentMessageInput" } } }
+      responses:
+        "200": { description: SSE response and tool lifecycle events, content: { text/event-stream: {} } }
+  /terminal/history:
+    get:
+      operationId: getTerminalHistory
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { description: Shell activity feed, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ShellEvent" } } } } }
+  /terminal/output:
+    get:
+      operationId: getTerminalOutput
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { description: Latest terminal output, content: { application/json: { schema: { $ref: "#/components/schemas/TerminalState" } } } }
+  /terminal/execute:
+    post:
+      operationId: executeTerminalCommand
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TerminalCommandInput" } } }
+      responses:
+        "200": { description: Shell event, content: { application/json: { schema: { $ref: "#/components/schemas/ShellEvent" } } } }
+        "400": { description: Blocked command, content: { application/json: { schema: { $ref: "#/components/schemas/ShellEvent" } } } }
+  /events:
+    get:
+      operationId: streamEvents
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { description: SSE activity stream, content: { text/event-stream: {} } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  parameters:
+    SessionId:
+      name: sessionId
+      in: query
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 128 }
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status, database, uptimeSeconds]
+      properties:
+        status: { type: string }
+        database: { type: string }
+        uptimeSeconds: { type: number }
+    NewSessionResponse:
+      type: object
+      required: [sessionId]
+      properties: { sessionId: { type: string } }
+    AgentMessageInput:
+      type: object
+      required: [content, sessionId]
+      properties:
+        content: { type: string, minLength: 1 }
+        sessionId: { type: string, minLength: 8 }
+        executeCommands: { type: boolean, default: false }
+    AgentMessage:
+      type: object
+      required: [id, role, content, createdAt]
+      properties:
+        id: { type: string }
+        role: { type: string, enum: [user, assistant, system] }
+        content: { type: string }
+        createdAt: { type: string, format: date-time }
+    ShellEvent:
+      type: object
+      required: [id, sessionId, origin, command, status, output, createdAt]
+      properties:
+        id: { type: string }
+        sessionId: { type: string }
+        origin: { type: string, enum: [user, ai, system] }
+        command: { type: string }
+        status: { type: string, enum: [running, completed, blocked, error] }
+        output: { type: string }
+        exitCode: { type: [number, "null"] }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: [string, "null"], format: date-time }
+    TerminalState:
+      type: object
+      required: [output, lastCommand, status, updatedAt]
+      properties:
+        output: { type: string }
+        lastCommand: { type: [string, "null"] }
+        status: { type: string, enum: [ready, running, success, error] }
+        updatedAt: { type: string, format: date-time }
+    TerminalCommandInput:
+      type: object
+      required: [command, sessionId]
+      properties:
+        command: { type: string, minLength: 1 }
+        sessionId: { type: string, minLength: 8 }
+    ServerStatus:
+      type: object
+      required: [api, openai, shellMode, database, sessionId, uptimeSeconds, recentCommand]
+      properties:
+        api: { type: string }
+        openai: { type: string, enum: [online] }
+        shellMode: { type: string, enum: [guarded, unrestricted] }
+        database: { type: string, enum: [available, error] }
+        sessionId: { type: string }
+        uptimeSeconds: { type: number }
+        recentCommand: { oneOf: [{ $ref: "#/components/schemas/ShellEvent" }, { type: "null" }] }

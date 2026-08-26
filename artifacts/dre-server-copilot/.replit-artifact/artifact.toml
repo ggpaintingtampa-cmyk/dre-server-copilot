@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "DRE Server Copilot"
+description = "A phone-first control surface for chatting with a DRE agent, reviewing terminal output, and explicitly approving shell commands on a RunPod server."
+version = "1.0.0"
+id = "artifacts/dre-server-copilot"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19646
+
+[services.development]
+run = "pnpm --filter @workspace/dre-server-copilot run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/dre-server-copilot", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/dre-server-copilot/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19646"
+BASE_PATH = "/"
