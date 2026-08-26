@@ -144,7 +144,7 @@ components:
       required: [api, openai, shellMode, database, sessionId, uptimeSeconds, recentCommand]
       properties:
         api: { type: string }
-        openai: { type: string, enum: [online] }
+        openai: { type: string, enum: [configured, missing] }
         shellMode: { type: string, enum: [guarded, unrestricted] }
         database: { type: string, enum: [available, error] }
         sessionId: { type: string }

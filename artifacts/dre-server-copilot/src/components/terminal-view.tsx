@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Play, Copy, CheckCircle2, Terminal as TerminalIcon, Bot, UserRound, MonitorCog } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { executeCommand, getShellHistory, subscribeToEvents, type ShellEvent } from '@/lib/dre-api';
@@ -11,12 +11,16 @@ export function TerminalView({ sessionId, tokenConfigured }: { sessionId: string
   const [isExecuting, setIsExecuting] = useState(false);
   const [command, setCommand] = useState('');
   const [copied, setCopied] = useState(false);
+  const [followingLatest, setFollowingLatest] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(() => {
     if (!tokenConfigured) return;
     void getShellHistory(sessionId)
-      .then((history) => { setEvents(history); setError(''); })
+      .then((history) => {
+        setEvents((current) => shellHistoryMatches(current, history) ? current : history);
+        setError('');
+      })
       .catch((requestError: Error) => setError(requestError.message));
   }, [sessionId, tokenConfigured]);
 
@@ -28,10 +32,25 @@ export function TerminalView({ sessionId, tokenConfigured }: { sessionId: string
   }, [refresh, sessionId, tokenConfigured]);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [events]);
+    if (!followingLatest || !scrollRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [events, followingLatest]);
+
+  const updateScrollPosition = () => {
+    const container = scrollRef.current;
+    if (!container) return;
+    setFollowingLatest(container.scrollHeight - container.scrollTop - container.clientHeight < 32);
+  };
+
+  const showLatest = () => {
+    const container = scrollRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+    setFollowingLatest(true);
+  };
 
   const handleCopy = () => {
     if (events.length) {
@@ -52,9 +71,9 @@ export function TerminalView({ sessionId, tokenConfigured }: { sessionId: string
   };
 
   return (
-    <div className="flex flex-col h-full bg-background relative">
-      <div className="flex-1 overflow-hidden p-4 pb-32 flex flex-col">
-        <div className="flex items-center justify-between mb-2">
+    <div className="flex h-full min-h-0 flex-col bg-background/80 relative">
+      <div className="min-h-0 flex-1 overflow-hidden p-3 pb-44 sm:p-4 flex flex-col">
+        <div className="mb-2 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <TerminalIcon className="w-4 h-4 text-muted-foreground" />
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
@@ -62,6 +81,11 @@ export function TerminalView({ sessionId, tokenConfigured }: { sessionId: string
             </span>
           </div>
           <div className="flex items-center gap-2">
+            {!followingLatest && events.length > 0 && (
+              <Button variant="ghost" size="sm" className="h-6 px-2 text-[10px] uppercase" onClick={showLatest}>
+                Latest
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -77,7 +101,8 @@ export function TerminalView({ sessionId, tokenConfigured }: { sessionId: string
 
         <div 
           ref={scrollRef}
-          className="flex-1 w-full bg-black/50 border border-border rounded-xl p-3 overflow-y-auto font-mono text-[13px] leading-relaxed text-zinc-300 whitespace-pre-wrap break-all shadow-inner"
+          onScroll={updateScrollPosition}
+          className="matrix-panel min-h-0 flex-1 w-full rounded-lg border border-border p-3 overflow-y-auto overscroll-contain font-mono text-[13px] leading-relaxed text-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere] shadow-inner"
         >
           {!tokenConfigured ? <span className="text-muted-foreground/50 italic">Enter the access token in Chat to view activity.</span> :
             error ? <span className="text-destructive">{error}</span> :
@@ -86,24 +111,25 @@ export function TerminalView({ sessionId, tokenConfigured }: { sessionId: string
         </div>
       </div>
 
-      <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-background via-background to-transparent pb-safe">
+      <div className="absolute bottom-0 left-0 right-0 p-3 sm:p-4 bg-gradient-to-t from-background via-background/95 to-transparent pb-safe">
         <form 
           onSubmit={handleExecute}
-          className="flex flex-col gap-2 bg-card border border-border p-3 rounded-xl shadow-lg relative z-10"
+          className="matrix-panel matrix-focus flex flex-col gap-2 rounded-lg border border-border p-3 shadow-lg relative z-10"
         >
           <div className="flex items-center gap-2 px-1">
             <span className="text-primary font-mono text-sm font-bold">$</span>
-            <Input
+            <Textarea
               value={command}
               onChange={(e) => setCommand(e.target.value)}
-              placeholder="Explicit command..."
-              className="border-0 focus-visible:ring-0 shadow-none bg-transparent font-mono text-sm px-1 h-8"
+              placeholder="Explicit diagnostic command…"
+              className="min-h-11 max-h-24 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-1 py-1 text-base font-mono leading-relaxed shadow-none focus-visible:ring-0"
               disabled={isExecuting || !tokenConfigured}
+              aria-label="Terminal command"
             />
           </div>
           <div className="flex items-center justify-between mt-1 pt-2 border-t border-border/50">
-            <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">
-              Requires explicit approval
+              <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">
+               Explicit approval
             </span>
             <Button 
               type="submit" 
@@ -120,6 +146,16 @@ export function TerminalView({ sessionId, tokenConfigured }: { sessionId: string
       </div>
     </div>
   );
+}
+
+function shellHistoryMatches(current: ShellEvent[], next: ShellEvent[]) {
+  return current.length === next.length && current.every((event, index) => {
+    const candidate = next[index];
+    return event.id === candidate.id &&
+      event.status === candidate.status &&
+      event.output === candidate.output &&
+      event.completedAt === candidate.completedAt;
+  });
 }
 
 function ActivityEntry({ event }: { event: ShellEvent }) {

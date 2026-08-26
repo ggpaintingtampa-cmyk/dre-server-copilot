@@ -29,7 +29,7 @@ export const GetServerStatusQueryParams = zod.object({
 
 export const GetServerStatusResponse = zod.object({
   "api": zod.string(),
-  "openai": zod.enum(['online']),
+  "openai": zod.enum(['configured', 'missing']),
   "shellMode": zod.enum(['guarded', 'unrestricted']),
   "database": zod.enum(['available', 'error']),
   "sessionId": zod.string(),

@@ -15,11 +15,11 @@ export function Home() {
   const refreshToken = () => setTokenConfigured(Boolean(getAgentToken()));
 
   return (
-    <div className="flex flex-col h-[100dvh] w-full max-w-md mx-auto bg-background border-x border-border/50 shadow-2xl relative overflow-hidden text-foreground">
+    <div className="flex flex-col h-[100dvh] w-full max-w-lg mx-auto bg-background/95 border-x border-border/50 shadow-2xl relative overflow-hidden text-foreground">
       {/* Header */}
-      <header className="flex-none h-14 border-b border-border bg-card/80 backdrop-blur flex items-center justify-between px-4 z-20">
+      <header className="flex-none h-14 border-b border-border bg-card/90 backdrop-blur flex items-center justify-between px-4 z-20">
         <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded bg-primary flex items-center justify-center">
+           <div className="w-6 h-6 rounded bg-primary flex items-center justify-center shadow-[0_0_12px_hsl(var(--primary)/0.2)]">
             <Terminal className="w-3.5 h-3.5 text-primary-foreground" />
           </div>
           <h1 className="font-bold tracking-tight text-sm uppercase">DRE Copilot</h1>
@@ -34,7 +34,7 @@ export function Home() {
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 relative overflow-hidden">
+      <main className="min-h-0 flex-1 relative overflow-hidden">
         <div className={cn("absolute inset-0 transition-opacity duration-200", activeView === 'chat' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none')}>
           <ChatView sessionId={sessionId} tokenConfigured={tokenConfigured} onTokenSaved={refreshToken} onSessionChanged={setSessionId} />
         </div>
@@ -47,7 +47,7 @@ export function Home() {
       </main>
 
       {/* Bottom Navigation */}
-      <nav className="flex-none h-16 border-t border-border bg-card pb-safe z-30">
+      <nav className="flex-none h-[4.25rem] border-t border-border bg-card/95 pb-safe z-30">
         <div className="flex h-full">
           <NavButton 
             active={activeView === 'chat'} 
@@ -87,13 +87,13 @@ function NavButton({
   return (
     <button
       onClick={onClick}
-      className={cn(
-        "flex-1 flex flex-col items-center justify-center gap-1 relative transition-colors duration-200 focus-visible:outline-none focus-visible:bg-accent",
+         className={cn(
+         "min-h-11 flex-1 flex flex-col items-center justify-center gap-1 relative transition-colors duration-200 focus-visible:outline-none focus-visible:bg-accent",
         active ? "text-primary" : "text-muted-foreground hover:text-foreground"
       )}
     >
       {active && (
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-8 h-0.5 bg-primary rounded-b-full shadow-[0_0_8px_rgba(245,158,11,0.8)]" />
+         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-10 h-0.5 bg-primary rounded-b-full shadow-[0_0_8px_hsl(var(--primary)/0.8)]" />
       )}
       {icon}
       <span className="text-[10px] font-bold uppercase tracking-wider">{label}</span>

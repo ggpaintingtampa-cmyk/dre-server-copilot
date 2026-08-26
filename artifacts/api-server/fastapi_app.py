@@ -78,11 +78,6 @@ GUARDED_PROGRAMS = {
     "ps",
     "df",
     "free",
-    "python",
-    "python3",
-    "node",
-    "npm",
-    "pnpm",
     "git",
 }
 SYSTEM_INSTRUCTIONS = """You are DRE, a careful server copilot for one Linux
@@ -137,23 +132,26 @@ class ActivityHub:
     """In-process pub/sub for SSE; SQLite remains the reconnect source of truth."""
 
     def __init__(self) -> None:
-        self._queues: set[asyncio.Queue[dict[str, Any]]] = set()
+        self._queues: dict[asyncio.Queue[dict[str, Any]], str] = {}
 
     async def publish(self, event: dict[str, Any]) -> None:
-        for queue in list(self._queues):
+        event_session_id = event.get("sessionId") or event.get("event", {}).get("sessionId")
+        for queue, session_id in list(self._queues.items()):
+            if event_session_id != session_id:
+                continue
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
                 pass
 
     @asynccontextmanager
-    async def subscribe(self) -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:
+    async def subscribe(self, session_id: str) -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
-        self._queues.add(queue)
+        self._queues[queue] = session_id
         try:
             yield queue
         finally:
-            self._queues.discard(queue)
+            self._queues.pop(queue, None)
 
 
 activity_hub = ActivityHub()
@@ -309,7 +307,7 @@ def get_shell_history(session_id: str, limit: int = 100) -> list[ShellEvent]:
             SELECT id, session_id, origin, command, status, output, exit_code, created_at, completed_at
             FROM shell_events
             WHERE session_id = ?
-            ORDER BY created_at ASC
+            ORDER BY created_at DESC, rowid DESC
             LIMIT ?
             """,
             (session_id, min(max(limit, 1), 200)),
@@ -320,7 +318,7 @@ def get_shell_history(session_id: str, limit: int = 100) -> list[ShellEvent]:
             command=row["command"], status=row["status"], output=row["output"],
             exitCode=row["exit_code"], createdAt=row["created_at"], completedAt=row["completed_at"],
         )
-        for row in rows
+        for row in reversed(rows)
     ]
 
 
@@ -505,7 +503,9 @@ async def agent_event_stream(message: AgentMessageInput) -> AsyncIterator[str]:
             request = {
                 "model": settings.openai_model,
                 "previous_response_id": response.id,
+                "instructions": SYSTEM_INSTRUCTIONS,
                 "input": tool_outputs,
+                "tools": tools,
             }
         answer = "".join(answer_parts).strip() or getattr(response, "output_text", "") or "I completed the requested server check."
         save_message(message.sessionId, "assistant", answer)
@@ -554,6 +554,12 @@ async def health_check() -> dict[str, Any]:
     }
 
 
+@app.get("/health", include_in_schema=False)
+async def legacy_health_check() -> dict[str, Any]:
+    """Compatibility alias for the original DRE agent health route."""
+    return await health_check()
+
+
 @app.get("/api/status", dependencies=[Depends(require_agent_token)])
 async def get_status(sessionId: str = Query(min_length=8, max_length=128)) -> dict[str, Any]:
     events = get_shell_history(sessionId, limit=1)
@@ -583,6 +589,28 @@ async def get_agent_history(sessionId: str = Query(min_length=8, max_length=128)
 async def chat_with_agent(message: AgentMessageInput) -> StreamingResponse:
     return StreamingResponse(
         agent_event_stream(message),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+class LegacyAskInput(BaseModel):
+    """The original endpoint accepted a prompt without requiring a session."""
+
+    content: str = Field(min_length=1, max_length=10000)
+    sessionId: str = Field(default_factory=lambda: str(uuid4()), min_length=8, max_length=128)
+    executeCommands: bool = False
+
+
+@app.post("/ask", dependencies=[Depends(require_agent_token)])
+async def legacy_ask(message: LegacyAskInput) -> StreamingResponse:
+    """Compatibility alias that keeps the old prompt shape and SSE response."""
+    return StreamingResponse(
+        agent_event_stream(AgentMessageInput(
+            content=message.content,
+            sessionId=message.sessionId,
+            executeCommands=message.executeCommands,
+        )),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
@@ -621,9 +649,9 @@ async def execute_terminal_command(command: TerminalCommandInput) -> JSONRespons
 
 
 @app.get("/api/events", dependencies=[Depends(require_agent_token)])
-async def events(_: str = Query(alias="sessionId", min_length=8, max_length=128)) -> StreamingResponse:
+async def events(session_id: str = Query(alias="sessionId", min_length=8, max_length=128)) -> StreamingResponse:
     async def stream() -> AsyncIterator[str]:
-        async with activity_hub.subscribe() as queue:
+        async with activity_hub.subscribe(session_id) as queue:
             yield make_event({"type": "connected"})
             while True:
                 try:

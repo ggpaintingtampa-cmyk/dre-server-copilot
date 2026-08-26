@@ -132,7 +132,6 @@ export function useHealthCheck<TData = Awaited<ReturnType<typeof healthCheck>>, 
 
   return withQueryKey(query, queryOptions.queryKey);
 }
-
 export const getGetServerStatusUrl = (params: GetServerStatusParams,) => {
   const normalizedParams = new URLSearchParams();
 
@@ -697,3 +696,4 @@ export function useStreamEvents<TData = Awaited<ReturnType<typeof streamEvents>>
 
   return withQueryKey(query, queryOptions.queryKey);
 }
+// End of generated API client.

@@ -101,7 +101,8 @@ export type ServerStatusOpenai = typeof ServerStatusOpenai[keyof typeof ServerSt
 
 
 export const ServerStatusOpenai = {
-  online: 'online',
+  configured: 'configured',
+  missing: 'missing',
 } as const;
 
 export type ServerStatusShellMode = typeof ServerStatusShellMode[keyof typeof ServerStatusShellMode];

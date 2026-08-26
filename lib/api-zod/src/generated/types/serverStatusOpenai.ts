@@ -10,5 +10,6 @@ export type ServerStatusOpenai = typeof ServerStatusOpenai[keyof typeof ServerSt
 
 
 export const ServerStatusOpenai = {
-  online: 'online',
+  configured: 'configured',
+  missing: 'missing',
 } as const;

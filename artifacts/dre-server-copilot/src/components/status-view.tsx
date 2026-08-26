@@ -19,24 +19,24 @@ export function StatusView({ sessionId, tokenConfigured }: { sessionId: string; 
   const isHealthy = status?.api === 'online';
 
   return (
-    <div className="flex flex-col h-full bg-background overflow-y-auto p-4 space-y-6 pb-32">
+    <div className="flex h-full flex-col overflow-y-auto bg-background/80 p-3 space-y-4 pb-32 sm:p-4">
       <div className="flex items-center gap-3">
         <Server className="w-5 h-5 text-primary" />
-        <h2 className="text-lg font-bold tracking-tight">System Status</h2>
+        <h2 className="text-base font-bold tracking-tight">System Status</h2>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="col-span-2 bg-card border border-border rounded-xl p-4 flex items-center justify-between shadow-sm">
+      <div className="grid grid-cols-2 gap-3">
+        <div className="matrix-panel col-span-2 flex items-center justify-between rounded-lg border border-border p-3 shadow-sm">
           <div className="flex items-center gap-3">
             <div className={cn(
-              "w-10 h-10 rounded-full flex items-center justify-center",
+               "flex h-9 w-9 items-center justify-center rounded-full",
               isHealthy ? "bg-teal-500/10 text-teal-400" : "bg-destructive/10 text-destructive"
             )}>
               <Activity className="w-5 h-5" />
             </div>
             <div>
               <p className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Health</p>
-              <p className="text-lg font-bold">
+               <p className="text-base font-bold">
                 {isHealthy ? 'Online' : 'Degraded'}
               </p>
             </div>
@@ -49,13 +49,13 @@ export function StatusView({ sessionId, tokenConfigured }: { sessionId: string; 
           </div>
         </div>
 
-        <div className="bg-card border border-border rounded-xl p-4 flex flex-col gap-2 shadow-sm">
+        <div className="matrix-panel flex flex-col gap-2 rounded-lg border border-border p-3 shadow-sm">
           <KeyRound className="w-5 h-5 text-muted-foreground" />
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">OpenAI</p>
           <p className="font-mono text-sm font-bold text-foreground">{status?.openai || 'Locked'}</p>
         </div>
 
-        <div className="bg-card border border-border rounded-xl p-4 flex flex-col gap-2 shadow-sm">
+        <div className="matrix-panel flex flex-col gap-2 rounded-lg border border-border p-3 shadow-sm">
           <Database className="w-5 h-5 text-muted-foreground" />
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">SQLite</p>
           <p className="font-mono text-sm font-bold text-foreground">{status?.database || 'Locked'}</p>
@@ -68,12 +68,12 @@ export function StatusView({ sessionId, tokenConfigured }: { sessionId: string; 
           <h3 className="text-sm font-bold tracking-tight uppercase">Last Execution</h3>
         </div>
         
-        <div className="bg-card border border-border rounded-xl p-4 space-y-4 shadow-sm">
+         <div className="matrix-panel rounded-lg border border-border p-3 space-y-3 shadow-sm">
           {status?.recentCommand ? (
             <>
               <div>
                 <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Command</p>
-                <div className="bg-black/50 border border-border/50 rounded p-2 font-mono text-xs text-primary truncate">
+                 <div className="rounded border border-border/50 bg-background/70 p-2 font-mono text-xs text-primary break-words [overflow-wrap:anywhere]">
                    {status.recentCommand.command}
                 </div>
               </div>
@@ -99,7 +99,7 @@ export function StatusView({ sessionId, tokenConfigured }: { sessionId: string; 
           )}
         </div>
       </div>
-      {status && <div className="rounded-xl border border-border bg-card p-4 text-xs text-muted-foreground"><ShieldCheck className="mr-2 inline h-4 w-4 text-primary" />Shell mode: <span className="font-mono text-foreground">{status.shellMode}</span> · Uptime: {Math.floor(status.uptimeSeconds / 60)}m · Session: <span className="font-mono">{status.sessionId.slice(0, 8)}</span></div>}
+       {status && <div className="matrix-panel rounded-lg border border-border p-3 text-xs text-muted-foreground"><ShieldCheck className="mr-2 inline h-4 w-4 text-primary" />Shell mode: <span className="font-mono text-foreground">{status.shellMode}</span> · Uptime: {Math.floor(status.uptimeSeconds / 60)}m · Session: <span className="font-mono">{status.sessionId.slice(0, 8)}</span></div>}
     </div>
   );
 }
