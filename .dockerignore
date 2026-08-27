@@ -1,0 +1,14 @@
+.git
+**/.git
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.venv
+**/dist
+**/.env
+**/.env.*
+dre-ui-fixes.patch
+*.sqlite
+*.sqlite3
+*.db
+*.log
