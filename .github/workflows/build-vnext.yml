@@ -35,4 +35,3 @@ jobs:
           push: true
           tags: |
             ghcr.io/ggpaintingtampa-cmyk/dre-small:vnext
-            ghcr.io/ggpaintingtampa-cmyk/dre-small:0a101d0

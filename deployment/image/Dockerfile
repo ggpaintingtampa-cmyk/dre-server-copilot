@@ -51,11 +51,8 @@ COPY deployment/tinymemory/manifest.json \
 
 COPY deployment/tinymemory/skills /opt/dre-memory-default/skills
 
-RUN curl -fsSL \
-  "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tgz" \
-  -o /tmp/ollama.tgz \
- && tar -xzf /tmp/ollama.tgz -C /usr \
- && rm -f /tmp/ollama.tgz \
+RUN curl -fsSL https://ollama.com/install.sh \
+  | OLLAMA_VERSION=${OLLAMA_VERSION} sh \
  && ollama --version
 
 COPY deployment/image/start-dre-vnext.sh \
