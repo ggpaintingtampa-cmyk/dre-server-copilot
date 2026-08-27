@@ -1,0 +1,761 @@
+From 594bae7b0fc3355558e172675ac34eb5f997fc87 Mon Sep 17 00:00:00 2001
+From: ggpaintingtampa-cmyk <ggpaintingtampa@gmail.com>
+Date: Thu, 27 Aug 2026 04:31:49 +0000
+Subject: [PATCH] Fix DRE chat streaming and mobile controls
+
+---
+ artifacts/api-server/fastapi_app.py           |  21 +-
+ .../src/components/chat-view.tsx              | 117 +++++++++--
+ .../src/hooks/use-agent-chat.ts               |  50 +++--
+ .../dre-server-copilot/src/lib/dre-api.ts     | 183 +++++++++++++++---
+ artifacts/dre-server-copilot/vite.config.ts   |  16 +-
+ tests/test_dre_server.py                      |  88 +++++++++
+ 6 files changed, 398 insertions(+), 77 deletions(-)
+
+diff --git a/artifacts/api-server/fastapi_app.py b/artifacts/api-server/fastapi_app.py
+index 59d12a4..8fea7cb 100644
+--- a/artifacts/api-server/fastapi_app.py
++++ b/artifacts/api-server/fastapi_app.py
+@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+ from fastapi.staticfiles import StaticFiles
+ from openai import AsyncOpenAI
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, model_validator
+ 
+ 
+ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+@@ -537,11 +537,14 @@ async def agent_event_stream(message: AgentMessageInput) -> AsyncIterator[str]:
+                 "input": tool_outputs,
+                 "tools": tools,
+             }
+-        answer = "".join(answer_parts).strip() or getattr(response, "output_text", "") or "I completed the requested server check."
+-        save_message(message.sessionId, "assistant", answer)
++        streamed_answer = "".join(answer_parts)
++        answer = streamed_answer if streamed_answer.strip() else (
++            getattr(response, "output_text", "").strip() or "I completed the requested server check."
++        )
++        saved_answer = save_message(message.sessionId, "assistant", answer)
+         if not answer_parts:
+             yield make_event({"type": "message", "content": answer})
+-        yield make_event({"type": "done"})
++        yield make_event({"type": "done", "messageId": saved_answer.id})
+         await activity_hub.publish({"type": "agent", "sessionId": message.sessionId, "status": "idle"})
+     except Exception:
+         logger.exception("DRE agent request failed")
+@@ -631,6 +634,16 @@ class LegacyAskInput(BaseModel):
+     sessionId: str = Field(default_factory=lambda: str(uuid4()), min_length=8, max_length=128)
+     executeCommands: bool = False
+ 
++    @model_validator(mode="before")
++    @classmethod
++    def accept_legacy_prompt_fields(cls, value: Any) -> Any:
++        if not isinstance(value, dict) or value.get("content"):
++            return value
++        for legacy_key in ("message", "prompt", "query"):
++            if value.get(legacy_key):
++                return {**value, "content": value[legacy_key]}
++        return value
++
+ 
+ @app.post("/ask", dependencies=[Depends(require_agent_token)])
+ async def legacy_ask(message: LegacyAskInput) -> StreamingResponse:
+diff --git a/artifacts/dre-server-copilot/src/components/chat-view.tsx b/artifacts/dre-server-copilot/src/components/chat-view.tsx
+index 04658cc..62c1212 100644
+--- a/artifacts/dre-server-copilot/src/components/chat-view.tsx
++++ b/artifacts/dre-server-copilot/src/components/chat-view.tsx
+@@ -4,7 +4,7 @@ import { useAgentChat } from '@/hooks/use-agent-chat';
+ import { Button } from '@/components/ui/button';
+ import { Input } from '@/components/ui/input';
+ import { Textarea } from '@/components/ui/textarea';
+-import { Send, Bot, User, KeyRound, RotateCcw, ArrowDown } from 'lucide-react';
++import { Send, Bot, User, KeyRound, RotateCcw, ArrowDown, Copy, Check } from 'lucide-react';
+ import { beginNewSession, getHistory, setAgentToken, type ChatMessage } from '@/lib/dre-api';
+ 
+ function AssistantText({ children }: { children: string }) {
+@@ -24,25 +24,38 @@ export function ChatView({
+ }) {
+   const [history, setHistory] = React.useState<ChatMessage[]>([]);
+   const [historyError, setHistoryError] = React.useState('');
+-  const { streamingMessage, isStreaming, streamError, sendMessage } = useAgentChat();
++  const { streamingMessage, isStreaming, streamError, sendMessage, resetTransientState } = useAgentChat();
+   const [input, setInput] = React.useState('');
+   const [tokenInput, setTokenInput] = React.useState('');
+-  const [allowServerChecks, setAllowServerChecks] = React.useState(false);
++  const [allowServerTools, setAllowServerTools] = React.useState(false);
++  const [copiedMessageId, setCopiedMessageId] = React.useState<string | null>(null);
++  const [copyError, setCopyError] = React.useState('');
+   const scrollRef = React.useRef<HTMLDivElement>(null);
++  const bottomAnchorRef = React.useRef<HTMLDivElement>(null);
++  const composerRef = React.useRef<HTMLTextAreaElement>(null);
+   const stickToBottomRef = React.useRef(true);
++  const historyRequestGenerationRef = React.useRef(0);
++  const previousTokenConfiguredRef = React.useRef(tokenConfigured);
+   const [showScrollButton, setShowScrollButton] = React.useState(false);
+ 
+   const refreshHistory = React.useCallback(() => {
++    const generation = historyRequestGenerationRef.current + 1;
++    historyRequestGenerationRef.current = generation;
+     if (!tokenConfigured) {
+       setHistory([]);
+       return;
+     }
+     void getHistory(sessionId)
+       .then((messages) => {
++        if (historyRequestGenerationRef.current !== generation) return;
+         setHistory(messages);
+         setHistoryError('');
+       })
+-      .catch((error: Error) => setHistoryError(error.message));
++      .catch((error: Error) => {
++        if (historyRequestGenerationRef.current === generation) {
++          setHistoryError(error.message);
++        }
++      });
+   }, [sessionId, tokenConfigured]);
+ 
+   React.useEffect(() => {
+@@ -51,12 +64,29 @@ export function ChatView({
+     return () => window.clearInterval(timer);
+   }, [refreshHistory]);
+ 
+-  React.useEffect(() => {
+-    if (scrollRef.current && stickToBottomRef.current) {
+-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
++  React.useLayoutEffect(() => {
++    if (stickToBottomRef.current) {
++      bottomAnchorRef.current?.scrollIntoView({ block: 'end' });
+     }
+   }, [history, streamingMessage]);
+ 
++  React.useEffect(() => {
++    const wasConfigured = previousTokenConfiguredRef.current;
++    previousTokenConfiguredRef.current = tokenConfigured;
++    if (tokenConfigured && !wasConfigured) {
++      window.requestAnimationFrame(() => composerRef.current?.focus());
++    }
++  }, [tokenConfigured]);
++
++  React.useLayoutEffect(() => {
++    const composer = composerRef.current;
++    if (!composer) return;
++    composer.style.height = 'auto';
++    const maxHeight = Math.max(96, Math.floor(window.innerHeight * 0.3));
++    composer.style.height = `${Math.min(composer.scrollHeight, maxHeight)}px`;
++    composer.style.overflowY = composer.scrollHeight > maxHeight ? 'auto' : 'hidden';
++  }, [input]);
++
+   const handleScroll = () => {
+     const element = scrollRef.current;
+     if (!element) return;
+@@ -77,7 +107,7 @@ export function ChatView({
+   const handleSubmit = (e: React.FormEvent) => {
+     e.preventDefault();
+     if (!input.trim() || isStreaming) return;
+-    sendMessage(sessionId, input, allowServerChecks, refreshHistory);
++    void sendMessage(sessionId, input, allowServerTools, refreshHistory);
+     setInput('');
+     stickToBottomRef.current = true;
+   };
+@@ -97,14 +127,45 @@ export function ChatView({
+   };
+ 
+   const startNewChat = () => {
++    historyRequestGenerationRef.current += 1;
+     setHistory([]);
+     setHistoryError('');
++    setInput('');
++    resetTransientState();
+     onSessionChanged(beginNewSession());
+   };
+ 
++  const copyAnswer = async (message: ChatMessage) => {
++    try {
++      if (navigator.clipboard?.writeText) {
++        await navigator.clipboard.writeText(message.content);
++      } else {
++        const fallback = document.createElement('textarea');
++        fallback.value = message.content;
++        fallback.style.position = 'fixed';
++        fallback.style.opacity = '0';
++        document.body.appendChild(fallback);
++        fallback.select();
++        const copied = document.execCommand('copy');
++        document.body.removeChild(fallback);
++        if (!copied) throw new Error('Copy was unavailable.');
++      }
++      setCopyError('');
++      setCopiedMessageId(message.id);
++      window.setTimeout(() => setCopiedMessageId((current) => current === message.id ? null : current), 1600);
++    } catch {
++      setCopyError('Copy failed. You can still select the response text.');
++    }
++  };
++
++  const persistedStreamingMessage = streamingMessage
++    ? history.some((message) => message.role === 'assistant' && message.content === streamingMessage)
++    : false;
++  const showStreamingMessage = Boolean(streamingMessage) && !persistedStreamingMessage;
++
+   return (
+     <div className="flex h-full min-h-0 flex-col bg-background/80 relative">
+-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-4 pb-44" ref={scrollRef} onScroll={handleScroll}>
++      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-4" ref={scrollRef} onScroll={handleScroll}>
+         {!tokenConfigured ? (
+           <div className="matrix-panel mx-auto mt-6 max-w-sm rounded-lg border border-border p-4 text-center">
+             <KeyRound className="mx-auto mb-3 h-6 w-6 text-primary" />
+@@ -112,7 +173,7 @@ export function ChatView({
+             <p className="mt-1 text-xs text-muted-foreground">Stored only for this browser session.</p>
+             <form className="mt-3 flex items-stretch gap-2" onSubmit={saveToken}>
+               <input className="sr-only" name="username" autoComplete="username" tabIndex={-1} aria-hidden="true" />
+-              <Input className="min-w-0 flex-1" name="dre-agent-token" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} placeholder="DRE_AGENT_TOKEN" type="password" autoComplete="current-password" aria-label="DRE access token" />
++              <Input className="min-w-0 flex-1 text-base" name="dre-agent-token" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} placeholder="DRE_AGENT_TOKEN" type="password" autoComplete="current-password" autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-label="DRE access token" />
+               <Button type="submit" size="sm" className="min-h-9 shrink-0" disabled={!tokenInput.trim()}>Save</Button>
+             </form>
+           </div>
+@@ -148,7 +209,20 @@ export function ChatView({
+               {msg.role === 'user' ? (
+                 <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+               ) : (
+-                <AssistantText>{msg.content}</AssistantText>
++                <div className="flex min-w-0 items-start gap-2">
++                  <AssistantText>{msg.content}</AssistantText>
++                  <Button
++                    type="button"
++                    variant="ghost"
++                    size="icon"
++                    className="h-7 w-7 shrink-0 text-muted-foreground hover:text-primary"
++                    onClick={() => void copyAnswer(msg)}
++                    aria-label={copiedMessageId === msg.id ? 'Response copied' : 'Copy response'}
++                    title={copiedMessageId === msg.id ? 'Copied' : 'Copy response'}
++                  >
++                    {copiedMessageId === msg.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
++                  </Button>
++                </div>
+               )}
+             </div>
+ 
+@@ -160,7 +234,7 @@ export function ChatView({
+           </div>
+         ))}
+ 
+-        {streamingMessage && (
++        {showStreamingMessage && (
+           <div className="flex w-full gap-3 justify-start animate-in fade-in slide-in-from-bottom-2">
+             <div className="w-8 h-8 rounded-full bg-secondary border border-border flex items-center justify-center shrink-0">
+               <Bot className="w-4 h-4 text-primary animate-pulse" />
+@@ -171,6 +245,7 @@ export function ChatView({
+             </div>
+           </div>
+         )}
++        <div ref={bottomAnchorRef} aria-hidden="true" className="h-px" />
+       </div>
+ 
+       {showScrollButton && (
+@@ -179,18 +254,25 @@ export function ChatView({
+         </Button>
+       )}
+ 
+-      <div className="absolute bottom-0 left-0 right-0 p-3 sm:p-4 bg-gradient-to-t from-background via-background/95 to-transparent pb-safe">
++      <div className="flex-none bg-gradient-to-t from-background via-background/95 to-transparent p-3 pt-5 sm:p-4 sm:pt-5 pb-safe">
++        {!tokenConfigured && (
++          <p id="composer-lock-message" className="mb-2 px-1 text-xs text-muted-foreground">
++            Save the DRE access token above to unlock messaging.
++          </p>
++        )}
+         <form 
+           onSubmit={handleSubmit}
+           className="matrix-panel matrix-focus flex items-end gap-2 rounded-lg border border-border p-2 shadow-lg relative z-10"
+         >
+           <Textarea
++            ref={composerRef}
+             value={input}
+             onChange={(e) => setInput(e.target.value)}
+             onKeyDown={handleComposerKeyDown}
+-            placeholder="Instruct the agent… (Shift+Enter for a new line)"
++            placeholder={tokenConfigured ? "Instruct the agent… (Shift+Enter for a new line)" : "Save the access token above to begin"}
+             className="min-h-20 max-h-[30vh] flex-1 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 text-base leading-relaxed shadow-none focus-visible:ring-0"
+             disabled={isStreaming || !tokenConfigured}
++            aria-describedby={tokenConfigured ? undefined : 'composer-lock-message'}
+             aria-label="Message the DRE agent"
+           />
+           <Button 
+@@ -207,17 +289,18 @@ export function ChatView({
+           <label className="flex min-h-7 items-center gap-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+           <input
+             type="checkbox"
+-            checked={allowServerChecks}
+-            onChange={(event) => setAllowServerChecks(event.target.checked)}
++             checked={allowServerTools}
++             onChange={(event) => setAllowServerTools(event.target.checked)}
+             disabled={isStreaming}
+             className="h-3.5 w-3.5 accent-primary"
+           />
+-           Guarded checks
++            Allow server tools
+           </label>
+           <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-[10px] uppercase" onClick={startNewChat} disabled={!tokenConfigured}>
+             <RotateCcw className="mr-1 h-3 w-3" /> New chat
+           </Button>
+         </div>
++        {copyError && <div className="mt-2 px-1 text-xs text-destructive">{copyError}</div>}
+       </div>
+     </div>
+   );
+diff --git a/artifacts/dre-server-copilot/src/hooks/use-agent-chat.ts b/artifacts/dre-server-copilot/src/hooks/use-agent-chat.ts
+index df8ae73..3d8db14 100644
+--- a/artifacts/dre-server-copilot/src/hooks/use-agent-chat.ts
++++ b/artifacts/dre-server-copilot/src/hooks/use-agent-chat.ts
+@@ -1,10 +1,23 @@
+-import { useState, useCallback } from 'react';
+-import { sendChat } from '@/lib/dre-api';
++import { useState, useCallback, useEffect, useRef } from 'react';
++import { readableMessage, sendChat } from '@/lib/dre-api';
+ 
+ export function useAgentChat() {
+   const [streamingMessage, setStreamingMessage] = useState<string>('');
+   const [isStreaming, setIsStreaming] = useState(false);
+   const [streamError, setStreamError] = useState<string | null>(null);
++  const requestGenerationRef = useRef(0);
++  const activeControllerRef = useRef<AbortController | null>(null);
++
++  const resetTransientState = useCallback(() => {
++    requestGenerationRef.current += 1;
++    activeControllerRef.current?.abort();
++    activeControllerRef.current = null;
++    setStreamingMessage('');
++    setStreamError(null);
++    setIsStreaming(false);
++  }, []);
++
++  useEffect(() => resetTransientState, [resetTransientState]);
+ 
+   const sendMessage = useCallback(async (
+     sessionId: string,
+@@ -12,26 +25,35 @@ export function useAgentChat() {
+     executeCommands: boolean = false,
+     onActivity?: () => void,
+   ) => {
++    const generation = requestGenerationRef.current + 1;
++    requestGenerationRef.current = generation;
++    activeControllerRef.current?.abort();
++    const controller = new AbortController();
++    activeControllerRef.current = controller;
+     setIsStreaming(true);
+     setStreamingMessage('');
+     setStreamError(null);
+-    
+-    // We add a temporary user message so it feels responsive instantly
+-    // We'll just rely on the stream and history invalidation for the rest.
+-    
++
++    const isCurrentRequest = () => requestGenerationRef.current === generation;
+     try {
+       await sendChat(sessionId, content, executeCommands, (data) => {
+-        if (data.content) setStreamingMessage((previous) => previous + data.content);
+-        if (data.error) setStreamError(data.error);
++        if (!isCurrentRequest()) return;
++        if (typeof data.content === 'string') setStreamingMessage((previous) => previous + data.content);
++        if (data.error !== undefined) setStreamError(readableMessage(data.error));
+         if (data.type === 'tool') onActivity?.();
+-      });
++      }, controller.signal);
+     } catch (err) {
+-      setStreamError(err instanceof Error ? err.message : 'Connection interrupted');
++      if (isCurrentRequest() && !controller.signal.aborted) {
++        setStreamError(readableMessage(err instanceof Error ? err.message : err, 'Connection interrupted'));
++      }
+     } finally {
+-      setIsStreaming(false);
+-      onActivity?.();
++      if (isCurrentRequest()) {
++        activeControllerRef.current = null;
++        setIsStreaming(false);
++        onActivity?.();
++      }
+     }
+   }, []);
+-  
+-  return { streamingMessage, isStreaming, streamError, sendMessage };
++
++  return { streamingMessage, isStreaming, streamError, sendMessage, resetTransientState };
+ }
+diff --git a/artifacts/dre-server-copilot/src/lib/dre-api.ts b/artifacts/dre-server-copilot/src/lib/dre-api.ts
+index 75c39c9..bc6dd96 100644
+--- a/artifacts/dre-server-copilot/src/lib/dre-api.ts
++++ b/artifacts/dre-server-copilot/src/lib/dre-api.ts
+@@ -57,35 +57,148 @@ function authHeaders(extra?: HeadersInit) {
+   return headers;
+ }
+ 
++function compactText(value: string, maxLength = 260) {
++  const text = value
++    .replace(/<[^>]*>/g, ' ')
++    .replace(/\s+/g, ' ')
++    .trim();
++  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
++}
++
++export function readableMessage(value: unknown, fallback = 'The DRE server returned an unexpected response.') {
++  if (typeof value === 'string') return compactText(value) || fallback;
++  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
++  if (!value || typeof value !== 'object') return fallback;
++
++  const record = value as Record<string, unknown>;
++  for (const key of ['detail', 'error', 'message']) {
++    if (record[key] !== undefined) {
++      return readableMessage(record[key], fallback);
++    }
++  }
++
++  try {
++    return compactText(JSON.stringify(record)) || fallback;
++  } catch {
++    return fallback;
++  }
++}
++
++function hasJsonContentType(response: Response) {
++  return response.headers.get('content-type')?.toLowerCase().includes('application/json') ?? false;
++}
++
++async function readResponseBody(response: Response): Promise<unknown> {
++  const text = await response.text();
++  if (!text.trim()) return null;
++  if (!hasJsonContentType(response)) return text;
++  try {
++    return JSON.parse(text) as unknown;
++  } catch {
++    return text;
++  }
++}
++
++function httpError(path: string, response: Response, payload: unknown) {
++  const status = `${response.status}${response.statusText ? ` ${response.statusText}` : ''}`;
++  const detail = readableMessage(payload, '');
++  return `Request to ${path} failed (${status})${detail ? `: ${detail}` : ''}`;
++}
++
+ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+   const response = await fetch(path, {
+     ...options,
+     headers: authHeaders(options.headers),
+   });
++  const payload = await readResponseBody(response);
+   if (!response.ok) {
+-    const detail = await response.json().catch(() => null);
+-    throw new Error(detail?.detail ?? 'The DRE server request failed.');
++    throw new Error(httpError(path, response, payload));
++  }
++  if (!hasJsonContentType(response)) {
++    const received = response.headers.get('content-type') || 'an unknown content type';
++    throw new Error(
++      `Unexpected response from ${path} (${response.status}): expected JSON but received ${received}.`,
++    );
+   }
+-  return response.json() as Promise<T>;
++  if (payload === null || typeof payload === 'string') {
++    throw new Error(`Malformed JSON response from ${path} (${response.status}).`);
++  }
++  return payload as T;
+ }
+ 
+-export const getHistory = (sessionId: string) =>
+-  request<ChatMessage[]>(`/api/agent/history?sessionId=${encodeURIComponent(sessionId)}`);
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
++}
+ 
+-export const getShellHistory = (sessionId: string) =>
+-  request<ShellEvent[]>(`/api/terminal/history?sessionId=${encodeURIComponent(sessionId)}`);
++function malformedResponse(path: string, expected: string): Error {
++  return new Error(`Malformed JSON response from ${path}: expected ${expected}.`);
++}
+ 
+-export const getServerStatus = (sessionId: string) =>
+-  request<ServerStatus>(`/api/status?sessionId=${encodeURIComponent(sessionId)}`);
++function isChatMessage(value: unknown): value is ChatMessage {
++  return isRecord(value)
++    && typeof value.id === 'string'
++    && (value.role === 'user' || value.role === 'assistant' || value.role === 'system')
++    && typeof value.content === 'string'
++    && typeof value.createdAt === 'string';
++}
+ 
+-export const executeCommand = (sessionId: string, command: string) =>
+-  request<ShellEvent>('/api/terminal/execute', {
++function isShellEvent(value: unknown): value is ShellEvent {
++  return isRecord(value)
++    && typeof value.id === 'string'
++    && typeof value.sessionId === 'string'
++    && (value.origin === 'user' || value.origin === 'ai' || value.origin === 'system')
++    && typeof value.command === 'string'
++    && (value.status === 'running' || value.status === 'completed' || value.status === 'blocked' || value.status === 'error')
++    && typeof value.output === 'string'
++    && (typeof value.exitCode === 'number' || value.exitCode === null)
++    && typeof value.createdAt === 'string'
++    && (typeof value.completedAt === 'string' || value.completedAt === null);
++}
++
++function isServerStatus(value: unknown): value is ServerStatus {
++  return isRecord(value)
++    && typeof value.api === 'string'
++    && (value.openai === 'configured' || value.openai === 'missing')
++    && (value.shellMode === 'guarded' || value.shellMode === 'unrestricted')
++    && (value.database === 'available' || value.database === 'error')
++    && typeof value.sessionId === 'string'
++    && typeof value.uptimeSeconds === 'number'
++    && (value.recentCommand === null || isShellEvent(value.recentCommand));
++}
++
++export async function getHistory(sessionId: string): Promise<ChatMessage[]> {
++  const path = `/api/agent/history?sessionId=${encodeURIComponent(sessionId)}`;
++  const payload = await request<unknown>(path);
++  if (!Array.isArray(payload) || !payload.every(isChatMessage)) throw malformedResponse(path, 'a chat message array');
++  return payload;
++}
++
++export async function getShellHistory(sessionId: string): Promise<ShellEvent[]> {
++  const path = `/api/terminal/history?sessionId=${encodeURIComponent(sessionId)}`;
++  const payload = await request<unknown>(path);
++  if (!Array.isArray(payload) || !payload.every(isShellEvent)) throw malformedResponse(path, 'a shell event array');
++  return payload;
++}
++
++export async function getServerStatus(sessionId: string): Promise<ServerStatus> {
++  const path = `/api/status?sessionId=${encodeURIComponent(sessionId)}`;
++  const payload = await request<unknown>(path);
++  if (!isServerStatus(payload)) throw malformedResponse(path, 'a server status object');
++  return payload;
++}
++
++export async function executeCommand(sessionId: string, command: string): Promise<ShellEvent> {
++  const path = '/api/terminal/execute';
++  const payload = await request<unknown>(path, {
+     method: 'POST',
+     headers: { 'Content-Type': 'application/json' },
+     body: JSON.stringify({ sessionId, command }),
+   });
++  if (!isShellEvent(payload)) throw malformedResponse(path, 'a shell event object');
++  return payload;
++}
+ 
+-type StreamEvent = { type?: string; content?: string; error?: string; event?: ShellEvent };
++type StreamEvent = { type?: string; content?: unknown; error?: unknown; event?: ShellEvent; messageId?: unknown };
+ 
+ function consumeSse(
+   response: Response,
+@@ -97,21 +210,28 @@ function consumeSse(
+   const decoder = new TextDecoder();
+   let buffer = '';
+   return (async () => {
+-    while (!signal?.aborted) {
+-      const { value, done } = await reader.read();
+-      if (done) break;
+-      buffer += decoder.decode(value, { stream: true });
+-      const blocks = buffer.split('\n\n');
+-      buffer = blocks.pop() ?? '';
+-      for (const block of blocks) {
+-        const line = block.split('\n').find((entry) => entry.startsWith('data: '));
+-        if (!line) continue;
+-        try {
+-          onEvent(JSON.parse(line.slice(6)) as StreamEvent);
+-        } catch {
+-          // Ignore malformed intermediary keepalive frames.
++    const cancelReader = () => void reader.cancel();
++    signal?.addEventListener('abort', cancelReader, { once: true });
++    try {
++      while (!signal?.aborted) {
++        const { value, done } = await reader.read();
++        if (done) break;
++        buffer += decoder.decode(value, { stream: true });
++        const blocks = buffer.split('\n\n');
++        buffer = blocks.pop() ?? '';
++        for (const block of blocks) {
++          const line = block.split('\n').find((entry) => entry.startsWith('data: '));
++          if (!line) continue;
++          try {
++            onEvent(JSON.parse(line.slice(6)) as StreamEvent);
++          } catch {
++            // Ignore malformed intermediary keepalive frames.
++          }
+         }
+       }
++    } finally {
++      signal?.removeEventListener('abort', cancelReader);
++      reader.releaseLock();
+     }
+   })();
+ }
+@@ -121,17 +241,24 @@ export async function sendChat(
+   content: string,
+   executeCommands: boolean,
+   onEvent: (event: StreamEvent) => void,
++  signal?: AbortSignal,
+ ) {
+   const response = await fetch('/api/agent/chat', {
+     method: 'POST',
+     headers: authHeaders({ 'Content-Type': 'application/json' }),
+     body: JSON.stringify({ sessionId, content, executeCommands }),
++    signal,
+   });
+   if (!response.ok) {
+-    const detail = await response.json().catch(() => null);
+-    throw new Error(detail?.detail ?? 'The DRE agent could not start.');
++    throw new Error(httpError('/api/agent/chat', response, await readResponseBody(response)));
++  }
++  if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
++    const payload = await readResponseBody(response);
++    throw new Error(
++      `Unexpected response from /api/agent/chat (${response.status}): expected a streaming response. ${readableMessage(payload, '')}`,
++    );
+   }
+-  return consumeSse(response, onEvent);
++  return consumeSse(response, onEvent, signal);
+ }
+ 
+ export function subscribeToEvents(sessionId: string, onEvent: (event: StreamEvent) => void) {
+diff --git a/artifacts/dre-server-copilot/vite.config.ts b/artifacts/dre-server-copilot/vite.config.ts
+index 82792ad..ada85a6 100644
+--- a/artifacts/dre-server-copilot/vite.config.ts
++++ b/artifacts/dre-server-copilot/vite.config.ts
+@@ -5,13 +5,7 @@ import { defineConfig } from 'vite';
+ 
+ import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
+ 
+-const rawPort = process.env.PORT;
+-
+-if (!rawPort) {
+-  throw new Error(
+-    'PORT environment variable is required but was not provided.',
+-  );
+-}
++const rawPort = process.env.PORT ?? '19646';
+ 
+ const port = Number(rawPort);
+ 
+@@ -19,13 +13,7 @@ if (Number.isNaN(port) || port <= 0) {
+   throw new Error(`Invalid PORT value: "${rawPort}"`);
+ }
+ 
+-const basePath = process.env.BASE_PATH;
+-
+-if (!basePath) {
+-  throw new Error(
+-    'BASE_PATH environment variable is required but was not provided.',
+-  );
+-}
++const basePath = process.env.BASE_PATH ?? '/';
+ 
+ export default defineConfig({
+   base: basePath,
+diff --git a/tests/test_dre_server.py b/tests/test_dre_server.py
+index 2c2eab2..3e82569 100644
+--- a/tests/test_dre_server.py
++++ b/tests/test_dre_server.py
+@@ -126,6 +126,88 @@ class DreServerTests(unittest.TestCase):
+         self.assertEqual(requests[1]["instructions"], dre.SYSTEM_INSTRUCTIONS)
+         self.assertEqual(requests[1]["tools"], requests[0]["tools"])
+ 
++    def test_completed_stream_persists_one_assistant_message(self) -> None:
++        original_client = dre.get_openai_client
++        original_stream = dre.stream_openai_response
++
++        async def fake_stream(_client: object, _request: dict[str, object], answer_parts: list[str]):
++            answer_parts.append("Single completed reply.")
++            yield "Single completed reply.", SimpleNamespace(
++                id="response-single",
++                output_text="Single completed reply.",
++            ), []
++
++        async def collect_stream(message: dre.AgentMessageInput) -> list[dict[str, object]]:
++            events: list[dict[str, object]] = []
++            async for raw_event in dre.agent_event_stream(message):
++                if raw_event.startswith("data: "):
++                    events.append(json.loads(raw_event[6:]))
++            return events
++
++        dre.get_openai_client = lambda: object()
++        dre.stream_openai_response = fake_stream
++        session_id = "single-completed-reply-session"
++        try:
++            events = asyncio.run(collect_stream(dre.AgentMessageInput(
++                content="Give one reply.",
++                sessionId=session_id,
++            )))
++        finally:
++            dre.get_openai_client = original_client
++            dre.stream_openai_response = original_stream
++
++        assistant_messages = [
++            message for message in dre.get_history(session_id)
++            if message.role == "assistant"
++        ]
++        self.assertEqual([event["type"] for event in events], ["agent", "message_delta", "done"])
++        self.assertEqual([message.content for message in assistant_messages], ["Single completed reply."])
++        self.assertEqual(events[-1]["messageId"], assistant_messages[0].id)
++
++    def test_large_streamed_reply_is_complete_in_events_and_history(self) -> None:
++        original_client = dre.get_openai_client
++        original_stream = dre.stream_openai_response
++        reply = f"\n{'\n'.join(f'Diagnostic output line {index:04d}' for index in range(700))}\n"
++
++        async def fake_stream(_client: object, _request: dict[str, object], answer_parts: list[str]):
++            for start in range(0, len(reply), 137):
++                chunk = reply[start:start + 137]
++                answer_parts.append(chunk)
++                yield chunk, None, []
++            yield None, SimpleNamespace(id="response-large", output_text=reply), []
++
++        async def collect_stream(message: dre.AgentMessageInput) -> list[dict[str, object]]:
++            events: list[dict[str, object]] = []
++            async for raw_event in dre.agent_event_stream(message):
++                if raw_event.startswith("data: "):
++                    events.append(json.loads(raw_event[6:]))
++            return events
++
++        dre.get_openai_client = lambda: object()
++        dre.stream_openai_response = fake_stream
++        session_id = "large-streamed-reply-session"
++        try:
++            events = asyncio.run(collect_stream(dre.AgentMessageInput(
++                content="Provide detailed diagnostics.",
++                sessionId=session_id,
++            )))
++        finally:
++            dre.get_openai_client = original_client
++            dre.stream_openai_response = original_stream
++
++        streamed = "".join(
++            str(event.get("content", ""))
++            for event in events
++            if event.get("type") == "message_delta"
++        )
++        assistant_messages = [
++            message for message in dre.get_history(session_id)
++            if message.role == "assistant"
++        ]
++        self.assertGreater(len(reply), 10_000)
++        self.assertEqual(streamed, reply)
++        self.assertEqual([message.content for message in assistant_messages], [reply])
++
+     @staticmethod
+     async def _consume_stream(message: dre.AgentMessageInput) -> None:
+         async for _ in dre.agent_event_stream(message):
+@@ -158,6 +240,12 @@ class DreServerTests(unittest.TestCase):
+         paths = {getattr(route, "path", "") for route in dre.app.routes}
+         self.assertTrue({"/health", "/ask"}.issubset(paths))
+ 
++    def test_legacy_ask_accepts_message_prompt_and_query_fields(self) -> None:
++        for field_name in ("message", "prompt", "query"):
++            with self.subTest(field_name=field_name):
++                legacy_request = dre.LegacyAskInput(**{field_name: "Check server state."})
++                self.assertEqual(legacy_request.content, "Check server state.")
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+\ No newline at end of file
+-- 
+2.53.0
+
