@@ -131,6 +131,29 @@ class DreServerTests(unittest.TestCase):
         async for _ in dre.agent_event_stream(message):
             pass
 
+    def test_tinymemory_is_supplemental_and_prompt_is_preserved(self) -> None:
+        original_loader = dre.load_tiny_memory_context
+        try:
+            dre.load_tiny_memory_context = lambda: "DRE_TINYMEMORY_TEST_8271"
+            instructions = dre.request_instructions()
+            prompt = "Preserve this prompt exactly: $() ; &&"
+            rendered = dre.build_openai_input([dre.AgentMessage(
+                id="memory-test", role="user", content=prompt,
+                createdAt="2026-01-01T00:00:00+00:00",
+            )])
+        finally:
+            dre.load_tiny_memory_context = original_loader
+        self.assertIn("TinyMemory context:\nDRE_TINYMEMORY_TEST_8271", instructions)
+        self.assertIn(prompt, rendered)
+
+    def test_blank_tinymemory_leaves_instructions_unchanged(self) -> None:
+        original_loader = dre.load_tiny_memory_context
+        try:
+            dre.load_tiny_memory_context = lambda: ""
+            self.assertEqual(dre.request_instructions(), dre.SYSTEM_INSTRUCTIONS)
+        finally:
+            dre.load_tiny_memory_context = original_loader
+
     def test_legacy_compatibility_routes_remain_registered(self) -> None:
         paths = {getattr(route, "path", "") for route in dre.app.routes}
         self.assertTrue({"/health", "/ask"}.issubset(paths))

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import importlib.util
 import json
 import logging
 import os
@@ -85,6 +86,34 @@ server. Be concise and factual. Use the shell tool only when it materially
 helps answer the request. Shell actions are audited and may be blocked. Never
 claim a command ran unless the corresponding tool result says it completed.
 Explain the result in clear language for a phone user."""
+
+TINYMEMORY_LOADER_PATH = Path("/opt/dre-memory/load_memory.py")
+TINYMEMORY_ROOT = Path("/var/lib/dre-memory")
+
+
+def load_tiny_memory_context() -> str:
+    """Load trusted TinyMemory text without executing any memory content."""
+    try:
+        spec = importlib.util.spec_from_file_location("dre_tinymemory_loader", TINYMEMORY_LOADER_PATH)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("could not create TinyMemory loader specification")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        memory = module.load_memory(TINYMEMORY_ROOT)
+        if not isinstance(memory, str):
+            raise TypeError("TinyMemory loader returned non-text content")
+        return memory.strip()
+    except Exception:
+        logger.exception("TinyMemory loader failed; continuing without supplemental context")
+        return ""
+
+
+def request_instructions() -> str:
+    """Append request-time TinyMemory context while leaving prompts untouched."""
+    memory = load_tiny_memory_context()
+    if not memory:
+        return SYSTEM_INSTRUCTIONS
+    return f"{SYSTEM_INSTRUCTIONS}\n\nTinyMemory context:\n{memory}"
 
 
 class AgentMessageInput(BaseModel):
@@ -464,9 +493,10 @@ async def agent_event_stream(message: AgentMessageInput) -> AsyncIterator[str]:
         }]
     try:
         client = get_openai_client()
+        instructions = request_instructions()
         request: dict[str, Any] = {
             "model": settings.openai_model,
-            "instructions": SYSTEM_INSTRUCTIONS,
+            "instructions": instructions,
             "input": build_openai_input(get_history(message.sessionId)),
             "tools": tools,
         }
@@ -503,7 +533,7 @@ async def agent_event_stream(message: AgentMessageInput) -> AsyncIterator[str]:
             request = {
                 "model": settings.openai_model,
                 "previous_response_id": response.id,
-                "instructions": SYSTEM_INSTRUCTIONS,
+                "instructions": instructions,
                 "input": tool_outputs,
                 "tools": tools,
             }

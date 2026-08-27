@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "always_load": [
+    "persona.md",
+    "facts.md"
+  ],
+  "skills_index": "skills/00-index.md"
+}
