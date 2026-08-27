@@ -4,7 +4,7 @@ import { useAgentChat } from '@/hooks/use-agent-chat';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { Send, Bot, User, KeyRound, RotateCcw, ArrowDown } from 'lucide-react';
+import { Send, Bot, User, KeyRound, RotateCcw, ArrowDown, Copy, Check } from 'lucide-react';
 import { beginNewSession, getHistory, setAgentToken, type ChatMessage } from '@/lib/dre-api';
 
 function AssistantText({ children }: { children: string }) {
@@ -24,25 +24,38 @@ export function ChatView({
 }) {
   const [history, setHistory] = React.useState<ChatMessage[]>([]);
   const [historyError, setHistoryError] = React.useState('');
-  const { streamingMessage, isStreaming, streamError, sendMessage } = useAgentChat();
+  const { streamingMessage, isStreaming, streamError, sendMessage, resetTransientState } = useAgentChat();
   const [input, setInput] = React.useState('');
   const [tokenInput, setTokenInput] = React.useState('');
-  const [allowServerChecks, setAllowServerChecks] = React.useState(false);
+  const [allowServerTools, setAllowServerTools] = React.useState(false);
+  const [copiedMessageId, setCopiedMessageId] = React.useState<string | null>(null);
+  const [copyError, setCopyError] = React.useState('');
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const bottomAnchorRef = React.useRef<HTMLDivElement>(null);
+  const composerRef = React.useRef<HTMLTextAreaElement>(null);
   const stickToBottomRef = React.useRef(true);
+  const historyRequestGenerationRef = React.useRef(0);
+  const previousTokenConfiguredRef = React.useRef(tokenConfigured);
   const [showScrollButton, setShowScrollButton] = React.useState(false);
 
   const refreshHistory = React.useCallback(() => {
+    const generation = historyRequestGenerationRef.current + 1;
+    historyRequestGenerationRef.current = generation;
     if (!tokenConfigured) {
       setHistory([]);
       return;
     }
     void getHistory(sessionId)
       .then((messages) => {
+        if (historyRequestGenerationRef.current !== generation) return;
         setHistory(messages);
         setHistoryError('');
       })
-      .catch((error: Error) => setHistoryError(error.message));
+      .catch((error: Error) => {
+        if (historyRequestGenerationRef.current === generation) {
+          setHistoryError(error.message);
+        }
+      });
   }, [sessionId, tokenConfigured]);
 
   React.useEffect(() => {
@@ -51,11 +64,28 @@ export function ChatView({
     return () => window.clearInterval(timer);
   }, [refreshHistory]);
 
-  React.useEffect(() => {
-    if (scrollRef.current && stickToBottomRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  React.useLayoutEffect(() => {
+    if (stickToBottomRef.current) {
+      bottomAnchorRef.current?.scrollIntoView({ block: 'end' });
     }
   }, [history, streamingMessage]);
+
+  React.useEffect(() => {
+    const wasConfigured = previousTokenConfiguredRef.current;
+    previousTokenConfiguredRef.current = tokenConfigured;
+    if (tokenConfigured && !wasConfigured) {
+      window.requestAnimationFrame(() => composerRef.current?.focus());
+    }
+  }, [tokenConfigured]);
+
+  React.useLayoutEffect(() => {
+    const composer = composerRef.current;
+    if (!composer) return;
+    composer.style.height = 'auto';
+    const maxHeight = Math.max(96, Math.floor(window.innerHeight * 0.3));
+    composer.style.height = `${Math.min(composer.scrollHeight, maxHeight)}px`;
+    composer.style.overflowY = composer.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }, [input]);
 
   const handleScroll = () => {
     const element = scrollRef.current;
@@ -77,7 +107,7 @@ export function ChatView({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isStreaming) return;
-    sendMessage(sessionId, input, allowServerChecks, refreshHistory);
+    void sendMessage(sessionId, input, allowServerTools, refreshHistory);
     setInput('');
     stickToBottomRef.current = true;
   };
@@ -97,14 +127,45 @@ export function ChatView({
   };
 
   const startNewChat = () => {
+    historyRequestGenerationRef.current += 1;
     setHistory([]);
     setHistoryError('');
+    setInput('');
+    resetTransientState();
     onSessionChanged(beginNewSession());
   };
 
+  const copyAnswer = async (message: ChatMessage) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(message.content);
+      } else {
+        const fallback = document.createElement('textarea');
+        fallback.value = message.content;
+        fallback.style.position = 'fixed';
+        fallback.style.opacity = '0';
+        document.body.appendChild(fallback);
+        fallback.select();
+        const copied = document.execCommand('copy');
+        document.body.removeChild(fallback);
+        if (!copied) throw new Error('Copy was unavailable.');
+      }
+      setCopyError('');
+      setCopiedMessageId(message.id);
+      window.setTimeout(() => setCopiedMessageId((current) => current === message.id ? null : current), 1600);
+    } catch {
+      setCopyError('Copy failed. You can still select the response text.');
+    }
+  };
+
+  const persistedStreamingMessage = streamingMessage
+    ? history.some((message) => message.role === 'assistant' && message.content === streamingMessage)
+    : false;
+  const showStreamingMessage = Boolean(streamingMessage) && !persistedStreamingMessage;
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background/80 relative">
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-4 pb-44" ref={scrollRef} onScroll={handleScroll}>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-4" ref={scrollRef} onScroll={handleScroll}>
         {!tokenConfigured ? (
           <div className="matrix-panel mx-auto mt-6 max-w-sm rounded-lg border border-border p-4 text-center">
             <KeyRound className="mx-auto mb-3 h-6 w-6 text-primary" />
@@ -112,7 +173,7 @@ export function ChatView({
             <p className="mt-1 text-xs text-muted-foreground">Stored only for this browser session.</p>
             <form className="mt-3 flex items-stretch gap-2" onSubmit={saveToken}>
               <input className="sr-only" name="username" autoComplete="username" tabIndex={-1} aria-hidden="true" />
-              <Input className="min-w-0 flex-1" name="dre-agent-token" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} placeholder="DRE_AGENT_TOKEN" type="password" autoComplete="current-password" aria-label="DRE access token" />
+              <Input className="min-w-0 flex-1 text-base" name="dre-agent-token" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} placeholder="DRE_AGENT_TOKEN" type="password" autoComplete="current-password" autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-label="DRE access token" />
               <Button type="submit" size="sm" className="min-h-9 shrink-0" disabled={!tokenInput.trim()}>Save</Button>
             </form>
           </div>
@@ -148,7 +209,20 @@ export function ChatView({
               {msg.role === 'user' ? (
                 <div className="whitespace-pre-wrap break-words">{msg.content}</div>
               ) : (
-                <AssistantText>{msg.content}</AssistantText>
+                <div className="flex min-w-0 items-start gap-2">
+                  <AssistantText>{msg.content}</AssistantText>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 shrink-0 text-muted-foreground hover:text-primary"
+                    onClick={() => void copyAnswer(msg)}
+                    aria-label={copiedMessageId === msg.id ? 'Response copied' : 'Copy response'}
+                    title={copiedMessageId === msg.id ? 'Copied' : 'Copy response'}
+                  >
+                    {copiedMessageId === msg.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  </Button>
+                </div>
               )}
             </div>
 
@@ -160,7 +234,7 @@ export function ChatView({
           </div>
         ))}
 
-        {streamingMessage && (
+        {showStreamingMessage && (
           <div className="flex w-full gap-3 justify-start animate-in fade-in slide-in-from-bottom-2">
             <div className="w-8 h-8 rounded-full bg-secondary border border-border flex items-center justify-center shrink-0">
               <Bot className="w-4 h-4 text-primary animate-pulse" />
@@ -171,6 +245,7 @@ export function ChatView({
             </div>
           </div>
         )}
+        <div ref={bottomAnchorRef} aria-hidden="true" className="h-px" />
       </div>
 
       {showScrollButton && (
@@ -179,18 +254,25 @@ export function ChatView({
         </Button>
       )}
 
-      <div className="absolute bottom-0 left-0 right-0 p-3 sm:p-4 bg-gradient-to-t from-background via-background/95 to-transparent pb-safe">
+      <div className="flex-none bg-gradient-to-t from-background via-background/95 to-transparent p-3 pt-5 sm:p-4 sm:pt-5 pb-safe">
+        {!tokenConfigured && (
+          <p id="composer-lock-message" className="mb-2 px-1 text-xs text-muted-foreground">
+            Save the DRE access token above to unlock messaging.
+          </p>
+        )}
         <form 
           onSubmit={handleSubmit}
           className="matrix-panel matrix-focus flex items-end gap-2 rounded-lg border border-border p-2 shadow-lg relative z-10"
         >
           <Textarea
+            ref={composerRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleComposerKeyDown}
-            placeholder="Instruct the agent… (Shift+Enter for a new line)"
+            placeholder={tokenConfigured ? "Instruct the agent… (Shift+Enter for a new line)" : "Save the access token above to begin"}
             className="min-h-20 max-h-[30vh] flex-1 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 text-base leading-relaxed shadow-none focus-visible:ring-0"
             disabled={isStreaming || !tokenConfigured}
+            aria-describedby={tokenConfigured ? undefined : 'composer-lock-message'}
             aria-label="Message the DRE agent"
           />
           <Button 
@@ -207,17 +289,18 @@ export function ChatView({
           <label className="flex min-h-7 items-center gap-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
           <input
             type="checkbox"
-            checked={allowServerChecks}
-            onChange={(event) => setAllowServerChecks(event.target.checked)}
+             checked={allowServerTools}
+             onChange={(event) => setAllowServerTools(event.target.checked)}
             disabled={isStreaming}
             className="h-3.5 w-3.5 accent-primary"
           />
-           Guarded checks
+            Allow server tools
           </label>
           <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-[10px] uppercase" onClick={startNewChat} disabled={!tokenConfigured}>
             <RotateCcw className="mr-1 h-3 w-3" /> New chat
           </Button>
         </div>
+        {copyError && <div className="mt-2 px-1 text-xs text-destructive">{copyError}</div>}
       </div>
     </div>
   );

@@ -126,6 +126,88 @@ class DreServerTests(unittest.TestCase):
         self.assertEqual(requests[1]["instructions"], dre.SYSTEM_INSTRUCTIONS)
         self.assertEqual(requests[1]["tools"], requests[0]["tools"])
 
+    def test_completed_stream_persists_one_assistant_message(self) -> None:
+        original_client = dre.get_openai_client
+        original_stream = dre.stream_openai_response
+
+        async def fake_stream(_client: object, _request: dict[str, object], answer_parts: list[str]):
+            answer_parts.append("Single completed reply.")
+            yield "Single completed reply.", SimpleNamespace(
+                id="response-single",
+                output_text="Single completed reply.",
+            ), []
+
+        async def collect_stream(message: dre.AgentMessageInput) -> list[dict[str, object]]:
+            events: list[dict[str, object]] = []
+            async for raw_event in dre.agent_event_stream(message):
+                if raw_event.startswith("data: "):
+                    events.append(json.loads(raw_event[6:]))
+            return events
+
+        dre.get_openai_client = lambda: object()
+        dre.stream_openai_response = fake_stream
+        session_id = "single-completed-reply-session"
+        try:
+            events = asyncio.run(collect_stream(dre.AgentMessageInput(
+                content="Give one reply.",
+                sessionId=session_id,
+            )))
+        finally:
+            dre.get_openai_client = original_client
+            dre.stream_openai_response = original_stream
+
+        assistant_messages = [
+            message for message in dre.get_history(session_id)
+            if message.role == "assistant"
+        ]
+        self.assertEqual([event["type"] for event in events], ["agent", "message_delta", "done"])
+        self.assertEqual([message.content for message in assistant_messages], ["Single completed reply."])
+        self.assertEqual(events[-1]["messageId"], assistant_messages[0].id)
+
+    def test_large_streamed_reply_is_complete_in_events_and_history(self) -> None:
+        original_client = dre.get_openai_client
+        original_stream = dre.stream_openai_response
+        reply = f"\n{'\n'.join(f'Diagnostic output line {index:04d}' for index in range(700))}\n"
+
+        async def fake_stream(_client: object, _request: dict[str, object], answer_parts: list[str]):
+            for start in range(0, len(reply), 137):
+                chunk = reply[start:start + 137]
+                answer_parts.append(chunk)
+                yield chunk, None, []
+            yield None, SimpleNamespace(id="response-large", output_text=reply), []
+
+        async def collect_stream(message: dre.AgentMessageInput) -> list[dict[str, object]]:
+            events: list[dict[str, object]] = []
+            async for raw_event in dre.agent_event_stream(message):
+                if raw_event.startswith("data: "):
+                    events.append(json.loads(raw_event[6:]))
+            return events
+
+        dre.get_openai_client = lambda: object()
+        dre.stream_openai_response = fake_stream
+        session_id = "large-streamed-reply-session"
+        try:
+            events = asyncio.run(collect_stream(dre.AgentMessageInput(
+                content="Provide detailed diagnostics.",
+                sessionId=session_id,
+            )))
+        finally:
+            dre.get_openai_client = original_client
+            dre.stream_openai_response = original_stream
+
+        streamed = "".join(
+            str(event.get("content", ""))
+            for event in events
+            if event.get("type") == "message_delta"
+        )
+        assistant_messages = [
+            message for message in dre.get_history(session_id)
+            if message.role == "assistant"
+        ]
+        self.assertGreater(len(reply), 10_000)
+        self.assertEqual(streamed, reply)
+        self.assertEqual([message.content for message in assistant_messages], [reply])
+
     @staticmethod
     async def _consume_stream(message: dre.AgentMessageInput) -> None:
         async for _ in dre.agent_event_stream(message):
@@ -157,6 +239,12 @@ class DreServerTests(unittest.TestCase):
     def test_legacy_compatibility_routes_remain_registered(self) -> None:
         paths = {getattr(route, "path", "") for route in dre.app.routes}
         self.assertTrue({"/health", "/ask"}.issubset(paths))
+
+    def test_legacy_ask_accepts_message_prompt_and_query_fields(self) -> None:
+        for field_name in ("message", "prompt", "query"):
+            with self.subTest(field_name=field_name):
+                legacy_request = dre.LegacyAskInput(**{field_name: "Check server state."})
+                self.assertEqual(legacy_request.content, "Check server state.")
 
 
 if __name__ == "__main__":

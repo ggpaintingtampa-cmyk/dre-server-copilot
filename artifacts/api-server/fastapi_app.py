@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -537,11 +537,14 @@ async def agent_event_stream(message: AgentMessageInput) -> AsyncIterator[str]:
                 "input": tool_outputs,
                 "tools": tools,
             }
-        answer = "".join(answer_parts).strip() or getattr(response, "output_text", "") or "I completed the requested server check."
-        save_message(message.sessionId, "assistant", answer)
+        streamed_answer = "".join(answer_parts)
+        answer = streamed_answer if streamed_answer.strip() else (
+            getattr(response, "output_text", "").strip() or "I completed the requested server check."
+        )
+        saved_answer = save_message(message.sessionId, "assistant", answer)
         if not answer_parts:
             yield make_event({"type": "message", "content": answer})
-        yield make_event({"type": "done"})
+        yield make_event({"type": "done", "messageId": saved_answer.id})
         await activity_hub.publish({"type": "agent", "sessionId": message.sessionId, "status": "idle"})
     except Exception:
         logger.exception("DRE agent request failed")
@@ -630,6 +633,16 @@ class LegacyAskInput(BaseModel):
     content: str = Field(min_length=1, max_length=10000)
     sessionId: str = Field(default_factory=lambda: str(uuid4()), min_length=8, max_length=128)
     executeCommands: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_prompt_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("content"):
+            return value
+        for legacy_key in ("message", "prompt", "query"):
+            if value.get(legacy_key):
+                return {**value, "content": value[legacy_key]}
+        return value
 
 
 @app.post("/ask", dependencies=[Depends(require_agent_token)])
