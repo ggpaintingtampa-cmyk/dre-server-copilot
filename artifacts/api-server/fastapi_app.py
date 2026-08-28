@@ -91,7 +91,7 @@ def request_instructions() -> str:
 
 
 class AgentMessageInput(BaseModel):
-    content: str = Field(min_length=1, max_length=10000)
+    content: str = Field(min_length=1, max_length=50000)
     sessionId: str = Field(min_length=8, max_length=128)
     executeCommands: bool = False
 
@@ -590,7 +590,7 @@ async def chat_with_agent(message: AgentMessageInput) -> StreamingResponse:
 class LegacyAskInput(BaseModel):
     """The original endpoint accepted a prompt without requiring a session."""
 
-    content: str = Field(min_length=1, max_length=10000)
+    content: str = Field(min_length=1, max_length=50000)
     sessionId: str = Field(default_factory=lambda: str(uuid4()), min_length=8, max_length=128)
     executeCommands: bool = False
 
