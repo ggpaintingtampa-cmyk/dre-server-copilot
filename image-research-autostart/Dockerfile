@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 FROM ghcr.io/ggpaintingtampa-cmyk/dre-small:v1.2
 
+# Bake the current DRE Copilot API source into every research image.
+COPY artifacts/api-server/fastapi_app.py /opt/dre-copilot/artifacts/api-server/fastapi_app.py
+
+
 RUN bash -Eeuo pipefail <<'PATCH'
 target=/opt/dre-vnext/start-dre-vnext.sh
 

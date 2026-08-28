@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - artifacts/api-server/fastapi_app.py
       - image-research-autostart/Dockerfile
       - .github/workflows/build-dre-small-v1.3-research.yml
 
@@ -31,6 +32,7 @@ jobs:
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
-          context: ./image-research-autostart
+          context: .
+          file: ./image-research-autostart/Dockerfile
           push: true
           tags: ghcr.io/ggpaintingtampa-cmyk/dre-small:v1.3-research

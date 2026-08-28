@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import importlib.util
 import json
 import logging
 import os
-import re
-import shlex
 import sqlite3
 import time
 from collections.abc import AsyncIterator
@@ -27,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -45,46 +44,50 @@ class Settings:
         "gpt-5.6-terra" if os.getenv("AI_INTEGRATIONS_OPENAI_API_KEY") else "gpt-5.6"
     )
     agent_token = os.getenv("DRE_AGENT_TOKEN", "")
-    allow_shell_execution = os.getenv("DRE_ALLOW_SHELL_EXECUTION", "false").lower() == "true"
     db_path = Path(os.getenv("DRE_STATE_DB_PATH", "/workspace/dre-copilot/state.sqlite3"))
     history_max_messages = int(os.getenv("DRE_HISTORY_MAX_MESSAGES", "40"))
     history_max_chars = int(os.getenv("DRE_HISTORY_MAX_CHARS", "30000"))
-    shell_timeout_seconds = int(os.getenv("DRE_SHELL_TIMEOUT_SECONDS", "30"))
-    shell_max_output_chars = int(os.getenv("DRE_SHELL_MAX_OUTPUT_CHARS", "20000"))
+    shell_timeout_seconds = int(os.getenv("DRE_SHELL_TIMEOUT_SECONDS", "300"))
+    shell_max_output_chars = int(os.getenv("DRE_SHELL_MAX_OUTPUT_CHARS", "50000"))
+    agent_max_tool_rounds = max(1, int(os.getenv("DRE_AGENT_MAX_TOOL_ROUNDS", "50")))
 
 
 settings = Settings()
 FRONTEND_DIST = Path(os.getenv("DRE_FRONTEND_DIST", Path(__file__).parent / "frontend-dist"))
-SENSITIVE_PATH_FRAGMENT = re.compile(
-    r"(^|/)(?:\.env(?:\.|$)|\.ssh|id_rsa|shadow|passwd|environ)(/|$)", re.IGNORECASE
-)
-SHELL_METACHARACTER = re.compile(r"[|&;<>()`$\\\n\r]")
-HARD_BLOCKED_PATTERN = re.compile(
-    r"(?:\brm\b|\bmkfs\b|\bshutdown\b|\breboot\b|\bpoweroff\b|\bhalt\b|"
-    r"\binit\s+[06]\b|:\s*\(\s*\)\s*\{|\bdd\b.*\bof=/dev/)",
-    re.IGNORECASE,
-)
-GUARDED_PROGRAMS = {
-    "pwd",
-    "whoami",
-    "uptime",
-    "uname",
-    "date",
-    "ls",
-    "cat",
-    "head",
-    "tail",
-    "grep",
-    "ps",
-    "df",
-    "free",
-    "git",
-}
-SYSTEM_INSTRUCTIONS = """You are DRE, a careful server copilot for one Linux
-server. Be concise and factual. Use the shell tool only when it materially
-helps answer the request. Shell actions are audited and may be blocked. Never
-claim a command ran unless the corresponding tool result says it completed.
-Explain the result in clear language for a phone user."""
+SYSTEM_INSTRUCTIONS = """You are DRE, the user's root server administrator.
+When Server Tools are enabled, you are authorized to execute shell commands needed
+to complete the user's request. You may install or remove software, edit files,
+manage packages, services, processes, Git repositories, and system configuration.
+Never claim a command ran unless its tool result confirms it. Report results and
+failures accurately."""
+
+TINYMEMORY_LOADER_PATH = Path("/opt/dre-memory/load_memory.py")
+TINYMEMORY_ROOT = Path("/var/lib/dre-memory")
+
+
+def load_tiny_memory_context() -> str:
+    """Load trusted TinyMemory text without executing any memory content."""
+    try:
+        spec = importlib.util.spec_from_file_location("dre_tinymemory_loader", TINYMEMORY_LOADER_PATH)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("could not create TinyMemory loader specification")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        memory = module.load_memory(TINYMEMORY_ROOT)
+        if not isinstance(memory, str):
+            raise TypeError("TinyMemory loader returned non-text content")
+        return memory.strip()
+    except Exception:
+        logger.exception("TinyMemory loader failed; continuing without supplemental context")
+        return ""
+
+
+def request_instructions() -> str:
+    """Append request-time TinyMemory context while leaving prompts untouched."""
+    memory = load_tiny_memory_context()
+    if not memory:
+        return SYSTEM_INSTRUCTIONS
+    return f"{SYSTEM_INSTRUCTIONS}\n\nTinyMemory context:\n{memory}"
 
 
 class AgentMessageInput(BaseModel):
@@ -94,7 +97,7 @@ class AgentMessageInput(BaseModel):
 
 
 class TerminalCommandInput(BaseModel):
-    command: str = Field(min_length=1, max_length=4000)
+    command: str = Field(min_length=1, max_length=50000)
     sessionId: str = Field(min_length=8, max_length=128)
 
 
@@ -323,26 +326,10 @@ def get_shell_history(session_id: str, limit: int = 100) -> list[ShellEvent]:
 
 
 def is_guarded_command(command: str) -> tuple[bool, str | None, list[str] | None]:
-    """Centralized shell authorization for user and AI initiated commands."""
+    """Server Tools is the sole execution permission boundary."""
     if not command.strip():
         return False, "A command is required.", None
-    if HARD_BLOCKED_PATTERN.search(command):
-        return False, "That command is blocked because it could damage or stop the server.", None
-    if settings.allow_shell_execution:
-        return True, None, None
-    if SHELL_METACHARACTER.search(command):
-        return False, "Shell chaining, redirects, substitutions, and multiline input are blocked in guarded mode.", None
-    try:
-        parts = shlex.split(command)
-    except ValueError:
-        return False, "The command could not be parsed safely.", None
-    if not parts or parts[0] not in GUARDED_PROGRAMS:
-        return False, "Only explicitly approved diagnostic commands are allowed in guarded mode.", None
-    if parts[0] == "git" and (len(parts) < 2 or parts[1] not in {"status", "log", "diff", "branch"}):
-        return False, "Only git status, log, diff, and branch are allowed in guarded mode.", None
-    if any(SENSITIVE_PATH_FRAGMENT.search(part) for part in parts[1:]):
-        return False, "That path may contain credentials or sensitive operating-system data.", None
-    return True, None, parts
+    return True, None, None
 
 
 async def run_shell_command(
@@ -451,11 +438,11 @@ async def agent_event_stream(message: AgentMessageInput) -> AsyncIterator[str]:
         tools = [{
             "type": "function",
             "name": "run_shell_command",
-            "description": "Run one audited server diagnostic command. Commands may be blocked by policy.",
+            "description": "Execute a Bash shell command as root on the server.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "One diagnostic command."},
+                    "command": {"type": "string", "description": "A Bash command to execute as root."},
                     "reason": {"type": "string", "description": "Why this check is needed."},
                 },
                 "required": ["command", "reason"],
@@ -464,15 +451,16 @@ async def agent_event_stream(message: AgentMessageInput) -> AsyncIterator[str]:
         }]
     try:
         client = get_openai_client()
+        instructions = request_instructions()
         request: dict[str, Any] = {
             "model": settings.openai_model,
-            "instructions": SYSTEM_INSTRUCTIONS,
+            "instructions": instructions,
             "input": build_openai_input(get_history(message.sessionId)),
             "tools": tools,
         }
         answer_parts: list[str] = []
         response: Any | None = None
-        for _ in range(4):
+        for _ in range(settings.agent_max_tool_rounds):
             calls: list[Any] = []
             async for delta, completed_response, completed_calls in stream_openai_response(client, request, answer_parts):
                 if delta:
@@ -503,15 +491,20 @@ async def agent_event_stream(message: AgentMessageInput) -> AsyncIterator[str]:
             request = {
                 "model": settings.openai_model,
                 "previous_response_id": response.id,
-                "instructions": SYSTEM_INSTRUCTIONS,
+                "instructions": instructions,
                 "input": tool_outputs,
                 "tools": tools,
             }
-        answer = "".join(answer_parts).strip() or getattr(response, "output_text", "") or "I completed the requested server check."
-        save_message(message.sessionId, "assistant", answer)
+        streamed_answer = "".join(answer_parts)
+        answer = streamed_answer if streamed_answer.strip() else (
+            getattr(response, "output_text", "").strip()
+        )
+        if not answer:
+            raise RuntimeError("OpenAI returned no final assistant text.")
+        saved_answer = save_message(message.sessionId, "assistant", answer)
         if not answer_parts:
             yield make_event({"type": "message", "content": answer})
-        yield make_event({"type": "done"})
+        yield make_event({"type": "done", "messageId": saved_answer.id})
         await activity_hub.publish({"type": "agent", "sessionId": message.sessionId, "status": "idle"})
     except Exception:
         logger.exception("DRE agent request failed")
@@ -567,7 +560,7 @@ async def get_status(sessionId: str = Query(min_length=8, max_length=128)) -> di
     return {
         "api": "online",
         "openai": "configured" if settings.openai_api_key else "missing",
-        "shellMode": "unrestricted" if settings.allow_shell_execution else "guarded",
+        "shellMode": "server-tools-full-root",
         "database": "available" if database_ready else "error",
         "sessionId": sessionId,
         "uptimeSeconds": round(time.monotonic() - APP_STARTED_AT),
@@ -600,6 +593,16 @@ class LegacyAskInput(BaseModel):
     content: str = Field(min_length=1, max_length=10000)
     sessionId: str = Field(default_factory=lambda: str(uuid4()), min_length=8, max_length=128)
     executeCommands: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_prompt_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("content"):
+            return value
+        for legacy_key in ("message", "prompt", "query"):
+            if value.get(legacy_key):
+                return {**value, "content": value[legacy_key]}
+        return value
 
 
 @app.post("/ask", dependencies=[Depends(require_agent_token)])
