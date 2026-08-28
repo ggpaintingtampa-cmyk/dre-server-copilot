@@ -14,7 +14,13 @@ everywhere.
 ## Status
 
 Design contract only. No analysis prompts, Pass 1 map-building logic,
-follow-up query generation, or final synthesis logic exists yet.
+follow-up query generation, or final synthesis logic exists yet — this is
+true even though a queue/worker control-plane prototype now exists
+externally (see [`research/README.md`](../README.md) and
+[`research/worker/README.md`](../worker/README.md)). A real request's
+pipeline stage currently refuses explicitly with
+`REAL_RESEARCH_PIPELINE_NOT_IMPLEMENTED`; nothing in this component has
+been built or validated yet.
 
 ## Responsibilities
 
@@ -32,18 +38,35 @@ Two distinct passes, not one blended step:
   low-authority source, no primary evidence, etc.).
 - Produce a **preliminary research map**: a structured intermediate
   artifact capturing the above, not prose meant for the reader.
-- Generate **exactly 3** follow-up search queries. These must expand
-  evidence coverage — filling identified gaps, resolving contradictions,
-  or substantiating weak claims — not simply reword or paraphrase the
-  original question. A follow-up query that would plausibly return
-  overlapping results to an already-issued query has failed this
+- Generate **exactly 3** follow-up search queries, each with a distinct,
+  fixed purpose:
+  1. **Evidence / factual gaps** — fill in facts the initial 5 sources
+     didn't cover.
+  2. **Primary / authoritative evidence** — find the strongest, most
+     original/official source(s) for claims currently resting on weaker or
+     secondary sources.
+  3. **Dissent, contradictions, criticism, limitations, or an alternate
+     explanation** — actively search for credible disagreement with the
+     emerging picture, not just more confirmation of it.
+  Each query must expand evidence coverage, not simply reword or
+  paraphrase the original question. A follow-up query that would plausibly
+  return overlapping results to an already-issued query has failed this
   requirement.
+- **The dissent query (#3) is mandatory on every standard project.** If no
+  credible dissenting, critical, or materially different source exists for
+  a given question, use the query to surface the strongest credible
+  limitation or uncertainty instead. **Never manufacture disagreement** —
+  the goal is to actively look for it, not to invent it when none exists.
 
 ### Final synthesis — after retrieval/ranking of the full evidence set
 
-- Consume the selected evidence set produced by
-  [`research/ranking/README.md`](../ranking/README.md) (default: best 5
-  diverse sources, or a project-configured override).
+- Consume **all 20 ranked sources** (or however many were actually
+  collected) produced by [`research/ranking/README.md`](../ranking/README.md)
+  — the top 5 diverse sources tagged **PRIMARY EVIDENCE** and the rest
+  tagged **SUPPORTING EVIDENCE** (or a project-configured override of the
+  PRIMARY tier size). **Synthesis is not limited to the PRIMARY tier** —
+  supporting evidence is weighed too, just with the PRIMARY tier's sources
+  expected to carry the most weight in the final narrative.
 - Build the final research output: the long-form content
   [`research/reader/README.md`](../reader/README.md) will display.
 - Explicitly distinguish, in the structured output:
@@ -71,10 +94,9 @@ Two distinct passes, not one blended step:
 ## Inputs
 
 - Pass 1: the initial 5 usable source records (cleaned content + metadata).
-- Final synthesis: the selected evidence set from
-  [`research/ranking/README.md`](../ranking/README.md) (which itself draws
-  from all 20 usable sources, selected and unselected, per that
-  component's scoring), plus the Pass 1 preliminary research map for
+- Final synthesis: all 20 ranked sources from
+  [`research/ranking/README.md`](../ranking/README.md), tagged PRIMARY or
+  SUPPORTING evidence, plus the Pass 1 preliminary research map for
   continuity.
 
 ## Outputs
@@ -136,9 +158,14 @@ Two distinct passes, not one blended step:
 
 ## Acceptance criteria
 
-- Pass 1 always yields exactly 3 follow-up queries, each demonstrably
-  targeting a gap, contradiction, or weak claim identified in the
-  preliminary map rather than restating the original question.
+- Pass 1 always yields exactly 3 follow-up queries matching the three
+  fixed purposes (gaps, primary/authoritative evidence, dissent), each
+  demonstrably targeting the preliminary map rather than restating the
+  original question, and the dissent query always either surfaces a
+  credible dissenting source or an explicit, non-manufactured limitation/
+  uncertainty.
+- Final synthesis draws on all 20 ranked sources (PRIMARY and SUPPORTING),
+  not only the top 5.
 - The final synthesized report never attributes a claim to a source whose
   retrieved content does not support that claim.
 - The final report's structured backing data cleanly separates evidence,

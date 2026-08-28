@@ -11,10 +11,21 @@ never by asking a live in-memory process that might not exist anymore.
 
 ## Status
 
-Design contract only. No queue table, API, or worker-facing claim mechanism
-exists yet. This document defines what must exist before
-[`research/worker/README.md`](../worker/README.md) can be implemented
-against it.
+Design contract only within this repository. No queue table, API, or
+worker-facing claim mechanism ships here. This document defines what must
+exist before [`research/worker/README.md`](../worker/README.md) can be
+implemented against it.
+
+**External prototype validation:** a prototype (`research_jobs.py`) exists
+outside this repository, on the persistent volume at
+`/workspace/dre-research-runtime/app/`. Informal runtime testing there has
+passed for: queue operations, priority/FIFO ordering, move-to-top
+reordering, pause/resume, cancel, restart/retry, read/unread/archive,
+duplicate-worker protection, crash recovery, and project cleanup. This
+demonstrates the mechanics below are implementable as designed — it is not
+a production database, and the surrounding pipeline (retrieval, analysis,
+ranking, synthesis) is not implemented, so no research job actually
+completes end-to-end yet.
 
 ## Responsibilities
 
@@ -35,7 +46,7 @@ against it.
 
 - A new job: the research question/prompt, an optional priority, and
   optional project-level configuration (e.g. an override to the default
-  "best 5 diverse sources" selection size — see
+  PRIMARY-tier size of 5 diverse sources — see
   [`research/ranking/README.md`](../ranking/README.md)).
 - Control operations against an existing job ID: change priority, pause,
   resume, cancel, retry.

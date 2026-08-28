@@ -43,7 +43,20 @@ point one will start from.
    would run one if it's dropped onto a persistent `/workspace` volume
    later. See [`research/README.md`](../research/README.md) and
    [`research/worker/README.md`](../research/worker/README.md) for what is
-   meant to eventually occupy that hook point.
+   meant to eventually occupy that hook point. **The eventual
+   `bootstrap.sh` must not execute worker code directly from
+   `/workspace`** — the Network Volume backing it does not reliably
+   preserve `chmod` (see
+   [`docs/storage/README.md`](../docs/storage/README.md)), so `bootstrap.sh`
+   is expected to sync/copy the persistent source under
+   `/workspace/dre-research-runtime/app/` into `/opt/dre-research`,
+   hash-verify it, and execute it from there instead, where normal Linux
+   permissions apply. A prototype (`start-research-worker.sh`) already
+   exists externally at that path and informally validates the worker's
+   claim/heartbeat/shutdown mechanics — see
+   [`research/worker/README.md`](../research/worker/README.md) — but it is
+   not part of this image or this repository, and this Dockerfile's
+   conditional hook is unchanged by that prototype's existence.
 
 ## Workflow / image tag
 
@@ -78,7 +91,9 @@ build would fail immediately.
    script exists): place an executable file at
    `/workspace/dre-research-runtime/bootstrap.sh` on the persistent volume,
    restart the container, and check `/tmp/dre-research-bootstrap.log` for
-   its output.
+   its output. Confirm the script actually synced its source into
+   `/opt/dre-research` and executed from there rather than directly out of
+   `/workspace` (see [`docs/storage/README.md`](../docs/storage/README.md)).
 5. Confirm `fastapi_app.py` inside the running image matches the commit you
    expect: `diff /opt/dre-copilot/artifacts/api-server/fastapi_app.py
    <your checked-out copy>`.

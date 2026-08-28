@@ -18,10 +18,13 @@ or dedup logic exists yet.
 
 - Run the **first phase**: collect 5 usable, unique sources for a job's
   initial analysis pass.
-- Run the **follow-up phase**: collect 15 additional usable, unique sources
-  from the 3 follow-up queries Qwen produces (see
-  [`research/analysis/README.md`](../analysis/README.md)), for a target
-  total of **20 usable unique sources** per job.
+- Run the **follow-up phase**: for each of the 3 follow-up queries Qwen
+  produces (see [`research/analysis/README.md`](../analysis/README.md) —
+  one targeting evidence/factual gaps, one targeting primary/authoritative
+  evidence, one targeting dissent/contradictions/criticism/limitations/an
+  alternate explanation), collect **5 usable, unique sources per query**
+  (15 additional total), for a target grand total of **20 usable unique
+  sources** per job.
 - Treat search results as candidates only — never count a search hit
   toward a quota until content has actually been retrieved and validated.
 - Attempt direct HTTP fetch first for every candidate URL.
@@ -46,8 +49,8 @@ or dedup logic exists yet.
 
 - A search query string (from either the initial question framing or one
   of Qwen's 3 follow-up queries).
-- A target usable-source count for the current phase (5 for initial, 15
-  for follow-up).
+- A target usable-source count for the current phase (5 for the initial
+  phase, 5 for each individual follow-up query — 15 total across the three).
 - The set of already-collected source URLs/content fingerprints for this
   job, for dedup purposes.
 
@@ -98,7 +101,7 @@ something bolted on near the end, after normal fetching has already
 
 Chromium/Playwright fallback is a **per-URL fetch strategy inside this
 retrieval layer**, evaluated fetch-by-fetch, during *either* the first-5 or
-the follow-up-15 collection phase:
+any of the three follow-up 5-source collection phases:
 
 1. Attempt a direct HTTP fetch.
 2. Run the extracted content through the unusable-content detector (empty
@@ -186,9 +189,10 @@ immediately marking a URL as a failed source:
 
 - A job's initial phase does not advance to analysis until either 5 usable
   unique sources are collected or a recorded exhaustion condition is hit.
-- A job's follow-up phase does not advance to ranking until either 15
-  additional usable unique sources are collected (20 total) or a recorded
-  exhaustion condition is hit.
+- A job's follow-up phase does not advance to ranking until either all 3
+  follow-up queries have each collected 5 usable unique sources (15
+  additional, 20 total) or a recorded exhaustion condition is hit for the
+  queries that came up short.
 - No search result is ever counted toward a quota without a successful,
   validated content retrieval behind it.
 - Every usable source, selected for final synthesis or not, is persisted

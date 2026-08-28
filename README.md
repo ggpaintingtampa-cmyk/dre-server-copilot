@@ -220,6 +220,18 @@ Treat "persisted to `/workspace`" as "survives process restart," not
 "survives infrastructure replacement," unless you have separately verified a
 persistent volume is mounted there.
 
+**Verified**: the production RunPod Network Volume (`BigLittleWeights`,
+150 GB, `EU-RO-1`) backing `/workspace` has been confirmed persistent and
+independently accessible via RunPod's S3-compatible API — including from a
+desktop machine with no Pod running — using rclone/WinFsp and AWS CLI. See
+[`docs/storage/README.md`](docs/storage/README.md) for the full operator
+guide, including a critical caveat: **Network Volume / FUSE access does not
+reliably preserve `chmod`**, so a file's permission bits under `/workspace`
+must never be treated as an execution-trust boundary. Anything meant to run
+as code (e.g. the research worker) must be synced from `/workspace` into
+`/opt/dre-research` and hash-verified before execution — see that guide's
+`/workspace` vs `/opt` rule.
+
 ## TinyMemory
 
 TinyMemory is an optional, best-effort source of extra context injected into
@@ -276,6 +288,7 @@ the system instructions sent to OpenAI on every chat turn.
 | `tests/test_dre_server.py` | Backend regression tests (contains one obsolete test, see below) |
 | `.env.example` | Documented environment variable names and defaults |
 | `research/` | Design-contract READMEs for the not-yet-built research subsystem |
+| `docs/storage/README.md` | Verified operator guide for the RunPod Network Volume, S3 API, rclone/WinFsp, and the `/workspace` vs `/opt` execution-trust rule |
 
 ## Repository map
 
@@ -294,6 +307,8 @@ the system instructions sent to OpenAI on every chat turn.
 │                                    scaffolding) — support packages, not individually documented
 ├── scripts/                       — build helper scripts
 ├── tests/                         — backend regression tests
+├── docs/
+│   └── storage/README.md          — VERIFIED operator guide: Network Volume, S3, rclone, /opt rule
 └── research/                      — DESIGN CONTRACTS for the planned research subsystem
     ├── README.md                  — master research architecture
     ├── queue/README.md            — persistent job queue design
@@ -424,15 +439,43 @@ behavior.
 
 ## Research-system roadmap
 
-`research/` contains **design contracts**, not working code, for a
-background research pipeline meant to sit alongside DRE chat:
+`research/` contains **design contracts** for a background research
+pipeline meant to sit alongside DRE chat. As of this documentation pass, a
+**prototype control-plane implementation exists outside this repository**,
+on the persistent volume at `/workspace/dre-research-runtime/app/`
+(`research_jobs.py`, `research_worker.py`, `research_pipeline.py`,
+`start-research-worker.sh`). Informal runtime validation has passed for the
+*mechanics* of running jobs — queue operations, priority/FIFO ordering,
+move-to-top reordering, pause/resume, cancel, restart/retry, read/unread/
+archive, worker heartbeat, duplicate-worker protection, crash recovery,
+process-group cancellation, worker shutdown, and project cleanup. **A
+production research database and production worker have not yet been
+initialized, and the real research pipeline (retrieval, analysis, ranking,
+synthesis) is not implemented** — a real research request currently refuses
+explicitly with `REAL_RESEARCH_PIPELINE_NOT_IMPLEMENTED`. Do not read the
+above as "the research engine ships in this repository" — it doesn't; only
+the queue/worker control-plane mechanics have been prototyped and
+validated, externally, and the design contracts below remain the target
+architecture for the pipeline itself.
 
 > Submit a question → job goes into a persistent background queue → status
 > and priority controls → collect 5 usable initial sources → local Qwen
-> analyzes those sources and produces exactly 3 follow-up search queries →
-> collect 15 more usable, unique sources → score/rank/select the strongest,
-> diverse evidence → final synthesis → save the project → publish to a
-> reader UI.
+> analyzes those sources and produces exactly 3 follow-up search queries,
+> each targeting a distinct purpose (evidence/factual gaps, primary/
+> authoritative evidence, and dissent/contradictions/criticism/limitations/
+> alternate explanation) → collect 5 unique sources per follow-up query
+> (15 total, 20 overall) → rank all 20; the top 5 become PRIMARY EVIDENCE
+> and the rest remain SUPPORTING EVIDENCE → final synthesis considers all
+> 20 sources, not only the top 5 → save the project → publish to a reader
+> UI.
+
+Every standard project must actively seek at least one credible
+dissenting, critical, or materially different source via its third
+follow-up query. If no credible dissent exists, the strongest credible
+limitation or uncertainty is used instead — disagreement is never
+manufactured. See [`research/README.md`](research/README.md) and
+[`research/analysis/README.md`](research/analysis/README.md) for the full
+contract.
 
 Key properties the design commits to:
 
@@ -445,7 +488,7 @@ Key properties the design commits to:
   [Persistence / storage rules](#persistence--storage-rules)).
 - Chromium/Playwright is a **cross-cutting retrieval fallback**, not a
   distinct late pipeline stage — it can trigger during either the first-5 or
-  the follow-up-15 source collection, whenever plain HTTP fetch cannot
+  any follow-up-5 source collection, whenever plain HTTP fetch cannot
   obtain complete, usable content.
 - A finished project is read in a dedicated **reader** UI, not the chat
   textbox, with sources retained but collapsed by default.
@@ -504,6 +547,7 @@ obsolete test together, deliberately, rather than by accident.
 - [`artifacts/dre-server-copilot/README.md`](artifacts/dre-server-copilot/README.md) — the production React frontend
 - [`artifacts/mockup-sandbox/README.md`](artifacts/mockup-sandbox/README.md) — prototype sandbox, not production
 - [`image-research-autostart/README.md`](image-research-autostart/README.md) — the `v1.3-research` image build
+- [`docs/storage/README.md`](docs/storage/README.md) — verified Network Volume / S3 / rclone operator guide
 - [`research/README.md`](research/README.md) — research subsystem master design contract
   - [`research/queue/README.md`](research/queue/README.md)
   - [`research/worker/README.md`](research/worker/README.md)

@@ -4,9 +4,12 @@
 
 ## Purpose
 
-Turn up to 20 usable sources into a small, strong, **diverse** evidence set
-for final synthesis — through a transparent, explainable scoring model,
-not an opaque "Qwen just picks its favorites" judgment call.
+Score and tier up to 20 usable sources into **PRIMARY EVIDENCE** (a small,
+strong, diverse top set) and **SUPPORTING EVIDENCE** (everything else) —
+through a transparent, explainable scoring model, not an opaque "Qwen just
+picks its favorites" judgment call. Unlike an earlier version of this
+contract, ranking here does **not** discard the non-top sources: all 20
+are handed to final synthesis, tiered rather than filtered.
 
 ## Status
 
@@ -20,14 +23,16 @@ or diversity-aware selection (MMR or otherwise) exists yet.
   multiple normalized dimensions.
 - Combine those dimension scores into an overall score using a documented,
   tunable weighting — not a black-box single number with no explanation.
-- Apply diversity-aware selection on top of raw scoring, so the final
-  evidence set isn't several near-duplicate articles that all happened to
-  score well individually.
+- Apply diversity-aware selection to choose the **PRIMARY EVIDENCE** tier
+  (default: top 5) on top of raw scoring, so it isn't several
+  near-duplicate articles that all happened to score well individually.
+  Every source not chosen for PRIMARY becomes **SUPPORTING EVIDENCE** — it
+  is not discarded.
 - Persist every component score, the overall score, a diversity penalty/
-  similarity measure, and a human-readable selection reason for every
-  scored source — selected or not.
-- Leave all usable sources in storage regardless of selection outcome —
-  ranking filters what goes into synthesis, it never deletes anything.
+  similarity measure, the PRIMARY/SUPPORTING tier assignment, and a
+  human-readable selection reason for every scored source.
+- Leave all usable sources in storage regardless of tier — ranking tiers
+  what goes into synthesis, it never deletes or excludes anything from it.
 
 ## Inputs
 
@@ -41,11 +46,12 @@ or diversity-aware selection (MMR or otherwise) exists yet.
 
 - Per-source scoring records: each dimension score, the overall weighted
   score, a diversity penalty/similarity value relative to already-selected
-  sources, and a short selection reason string (e.g. "selected: high
-  authority + high relevance, sufficiently distinct from source X" or "not
-  selected: near-duplicate of higher-scoring source Y").
-- The final selected evidence set (an ordered list of source IDs) handed to
-  [`research/analysis/README.md`](../analysis/README.md) for synthesis.
+  PRIMARY sources, and a short selection reason string (e.g. "PRIMARY: high
+  authority + high relevance, sufficiently distinct from source X" or
+  "SUPPORTING: near-duplicate of higher-scoring source Y").
+- **All 20 ranked sources**, each tagged PRIMARY or SUPPORTING, handed to
+  [`research/analysis/README.md`](../analysis/README.md) for synthesis —
+  synthesis considers the full set, not only PRIMARY.
 
 ## Persistence / state
 
@@ -110,13 +116,24 @@ the same wire story). To avoid that, selection should use a
 This guarantees the final evidence set trades off "individually strong" and
 "collectively non-redundant," rather than optimizing only the former.
 
-## Default selection size
+## PRIMARY / SUPPORTING evidence tiers
 
-The default final selected evidence set is the **best 5 diverse sources**.
+Ranking classifies every scored source into exactly one tier:
+
+- **PRIMARY EVIDENCE** — the default **best 5 diverse sources** selected by
+  the MMR-style process above. Expected to carry the most weight in the
+  final synthesized narrative.
+- **SUPPORTING EVIDENCE** — every other usable source (up to 15 more).
+  Still passed to synthesis in full, still fully provenanced, just not
+  weighted as heavily by default.
+
 A project's configuration (see
 [`research/queue/README.md`](../queue/README.md)'s per-job `config_json`)
-may override this size later; the scoring/selection algorithm itself should
-accept the target size as a parameter rather than hard-coding `5`.
+may override the PRIMARY tier size later; the scoring/selection algorithm
+itself should accept the target size as a parameter rather than
+hard-coding `5`. **Final synthesis always considers both tiers** — the
+tiering is a weighting signal for synthesis, not a filter that excludes
+SUPPORTING sources from it.
 
 ## Failure behavior
 
@@ -146,9 +163,12 @@ accept the target size as a parameter rather than hard-coding `5`.
 - Every usable source collected for a job has a persisted dimension-score
   breakdown, overall score, diversity penalty, and selection reason, not
   just the selected subset.
-- The final evidence set for synthesis is not simply "top N by raw score"
-  when near-duplicate high-scoring sources exist — diversity-aware
-  selection measurably changes the outcome in that case.
+- The PRIMARY tier is not simply "top N by raw score" when near-duplicate
+  high-scoring sources exist — diversity-aware selection measurably
+  changes the outcome in that case.
+- Every one of the 20 ranked sources — PRIMARY and SUPPORTING alike — is
+  actually passed to and considered by final synthesis; none are silently
+  dropped at the ranking stage.
 - Changing the scoring weights or the default selection size does not
   require touching retrieval, analysis, or worker code.
 - A human reviewing a project's stored ranking data can answer "why was

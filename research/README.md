@@ -2,19 +2,37 @@
 
 **Status: DESIGN CONTRACT — NOT FULLY IMPLEMENTED**
 
-Nothing under `research/` exists as working code yet. This directory is a
-set of design contracts written *before* implementation so that whoever
-builds this system (human or AI) has an agreed target architecture to build
-against, instead of inventing one ad hoc mid-implementation. Every file
-under `research/` repeats this status line so it can never be mistaken for
-a status report on a shipped feature.
+Nothing under `research/` exists as working code **in this repository**.
+This directory is a set of design contracts written *before* implementation
+so that whoever builds this system (human or AI) has an agreed target
+architecture to build against, instead of inventing one ad hoc
+mid-implementation. Every file under `research/` repeats this status line
+so it can never be mistaken for a status report on a shipped feature.
 
-The one thing that already exists in the codebase related to this system is
-a conditional startup hook in the `v1.3-research` DRE image (see
+The one thing that already exists in this repository related to this
+system is a conditional startup hook in the `v1.3-research` DRE image (see
 [`image-research-autostart/README.md`](../image-research-autostart/README.md))
 that will start `/workspace/dre-research-runtime/bootstrap.sh` in the
-background *if* it exists and is executable. That script, and everything it
-would start, does not exist yet.
+background *if* it exists and is executable. That script does not exist in
+this repository.
+
+**External prototype validation (not part of this repository):** a
+control-plane prototype now exists on the persistent volume at
+`/workspace/dre-research-runtime/app/` (`research_jobs.py`,
+`research_worker.py`, `research_pipeline.py`, `start-research-worker.sh`).
+Informal runtime testing has passed for queue operations, priority/FIFO,
+move-to-top, pause/resume, cancel, restart/retry, read/unread/archive,
+worker heartbeat, duplicate-worker protection, crash recovery,
+process-group cancellation, worker shutdown, project cleanup, and a
+`CONTROL_TEST` check. **A production research database and production
+worker have not been initialized, and the real research pipeline is not
+implemented** — a real request currently refuses explicitly with
+`REAL_RESEARCH_PIPELINE_NOT_IMPLEMENTED`. This validates that the
+*queue/worker control-plane mechanics* described below are buildable as
+designed; it does not mean the pipeline (retrieval → analysis → ranking →
+synthesis) exists or works yet. See
+[`docs/storage/README.md`](../docs/storage/README.md) for how the
+underlying persistent volume itself has been verified.
 
 ## Purpose
 
@@ -44,19 +62,26 @@ collect 5 usable initial sources (research/retrieval/) ← search != source; onl
 Qwen analyzes those 5 sources (research/analysis/, "Pass 1")
   │  → identifies known facts, contradictions, gaps, weak claims
   │  → produces a preliminary research map
-  │  → generates EXACTLY 3 follow-up search queries that expand evidence,
-  │     not paraphrase the original question
+  │  → generates EXACTLY 3 follow-up search queries, each with a distinct
+  │     purpose:
+  │       1. evidence / factual gaps
+  │       2. primary / authoritative evidence
+  │       3. dissent, contradictions, criticism, limitations, or an
+  │          alternate explanation
+  │     (queries expand evidence, never paraphrase the original question)
   ▼
-collect 15 additional usable, UNIQUE sources (research/retrieval/)
-  │  target total usable sources across both phases: 20
+collect 5 additional usable, UNIQUE sources PER follow-up query
+  │  (research/retrieval/) — 15 total across the 3 queries, 20 overall
   ▼
-score / rank / select evidence (research/ranking/)
+score / rank ALL 20 sources (research/ranking/)
   │  transparent, tunable scoring + diversity-aware selection (MMR-style)
-  │  default selected set: best 5 diverse sources, unless project config overrides
+  │  top 5 diverse sources → PRIMARY EVIDENCE; remaining 15 → SUPPORTING
+  │  EVIDENCE (unless project config overrides the PRIMARY tier size)
   ▼
 final synthesis (research/analysis/, "synthesis" pass)
+  │  considers ALL 20 sources — PRIMARY and SUPPORTING — not only the top 5
   │  distinguishes evidence, inference, uncertainty, disagreement
-  │  never invents source support
+  │  never invents source support; never manufactures disagreement
   ▼
 save project (research/projects/)
   │  durable under /workspace/dre-research-runtime
@@ -67,7 +92,7 @@ publish to reader (research/reader/)
 
 **Chromium/Playwright fallback is not a step in this list.** It is a
 cross-cutting capability inside the retrieval layer, usable during *either*
-the first-5 or the follow-up-15 collection phase — see
+the first-5 or any follow-up-5 collection phase — see
 [Why Chromium fallback lives in retrieval](#why-chromiumplaywright-fallback-lives-in-retrieval-not-as-a-late-stage)
 below and the fuller explanation in
 [`research/retrieval/README.md`](retrieval/README.md).
@@ -92,9 +117,15 @@ below and the fuller explanation in
   pod restarts only if `/workspace` is backed by an actual mounted
   persistent volume, not an assumption this system gets to make on its own.
 - **Search result ≠ usable source.** A search engine hit is a *candidate*.
-  It only counts toward the 5 or 15 quota once content has actually been
-  retrieved, is non-empty, is meaningfully readable, and is not a duplicate
-  of an already-collected source.
+  It only counts toward the 5-per-phase quota (initial phase, or any one of
+  the 3 follow-up queries) once content has actually been retrieved, is
+  non-empty, is meaningfully readable, and is not a duplicate of an
+  already-collected source.
+- **Every project actively seeks credible dissent.** The third follow-up
+  query is always aimed at dissent, contradictions, criticism, limitations,
+  or an alternate explanation. If no credible dissenting source exists for
+  a question, the strongest credible limitation or uncertainty is used
+  instead — disagreement is never manufactured to satisfy this requirement.
 - **Save every usable source, even unselected ones.** Ranking/selection for
   final synthesis does not delete or hide sources that weren't chosen —
   see [`research/ranking/README.md`](ranking/README.md) and
@@ -124,8 +155,8 @@ synthesis, which could suggest headless-browser fetching is something that
 happens "later." It is not. Chromium/Playwright is a **fallback fetch
 strategy inside the retrieval layer**, invoked per-URL, any time ordinary
 HTTP fetch fails to produce complete, usable content — whether that URL was
-discovered during the *first* 5-source collection phase or the *follow-up*
-15-source phase. It is cross-cutting because "this page needs a real
+discovered during the *first* 5-source collection phase or *any of the 3
+follow-up* 5-source phases. It is cross-cutting because "this page needs a real
 browser to render" is a property of the URL, not of which phase of the
 pipeline discovered it. See
 [`research/retrieval/README.md`](retrieval/README.md) for the detection
@@ -176,6 +207,7 @@ convention set for this documentation pass.
 This master document intentionally does not specify database column names,
 API route shapes, or class/module boundaries — those live in the linked
 component documents. This document exists to fix the pipeline shape, the
-5/15/20 source-count contract, the independence-from-chat requirement, and
-the Chromium-fallback placement so the component documents can't drift from
-each other on those points.
+5-initial / 3×5-follow-up / 20-total source-count contract, the
+PRIMARY/SUPPORTING evidence tiers, the dissent requirement, the
+independence-from-chat requirement, and the Chromium-fallback placement so
+the component documents can't drift from each other on those points.

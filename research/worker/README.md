@@ -10,8 +10,20 @@ browser tab, DRE chat session, or FastAPI request/response cycle.
 
 ## Status
 
-Design contract only. No worker process, claim loop, or lease
-implementation exists yet.
+Design contract only within this repository. No worker process, claim
+loop, or lease implementation ships here.
+
+**External prototype validation:** `research_worker.py` and
+`start-research-worker.sh` exist outside this repository, on the
+persistent volume at `/workspace/dre-research-runtime/app/`. Informal
+runtime testing there has passed for worker heartbeat, duplicate-worker
+protection, crash recovery, process-group cancellation, and worker
+shutdown. This validates the claim/lease/heartbeat mechanics below as
+implementable — it does not mean the pipeline stages themselves
+(retrieval/analysis/ranking/synthesis, see
+[Interfaces / dependencies](#interfaces--dependencies)) are implemented; a
+real job's `research_pipeline` stage currently refuses explicitly with
+`REAL_RESEARCH_PIPELINE_NOT_IMPLEMENTED`.
 
 ## Responsibilities
 
@@ -19,7 +31,15 @@ implementation exists yet.
   `/workspace/dre-research-runtime/bootstrap.sh` (the hook the
   `v1.3-research` image already conditionally invokes — see
   [`image-research-autostart/README.md`](../../image-research-autostart/README.md)
-  — but whose script does not exist yet).
+  — but whose script does not exist in this repository). **`bootstrap.sh`
+  must not execute the worker directly out of `/workspace`.** Because the
+  Network Volume backing `/workspace` does not reliably preserve `chmod`
+  (see [`docs/storage/README.md`](../../docs/storage/README.md)), the
+  persistent worker source under `/workspace/dre-research-runtime/app/`
+  must be copied/synchronized and hash-verified into `/opt/dre-research`
+  first, and executed from there, where normal Linux permissions and
+  execution trust apply. A file's permission bits as seen under
+  `/workspace` are never sufficient grounds to execute it directly.
 - Continuously poll/claim eligible queued jobs from
   [`research/queue/README.md`](../queue/README.md), honoring priority and
   FIFO-within-priority.
@@ -136,7 +156,11 @@ implementation exists yet.
   the already-shipped conditional hook in the `v1.3-research` image (see
   [`image-research-autostart/README.md`](../../image-research-autostart/README.md)).
   That script itself is part of this component's implementation and does
-  not exist yet.
+  not exist in this repository, though a `start-research-worker.sh`
+  prototype exists externally (see [Status](#status)). Depends on
+  [`docs/storage/README.md`](../../docs/storage/README.md) for the
+  `/workspace`-to-`/opt` sync/hash-verify rule this launch step must
+  follow.
 - Inspected/controlled by: DRE chat, indirectly, through the queue's
   status/control surface — never by DRE holding a direct handle on the
   worker process or blocking a chat turn on worker output.

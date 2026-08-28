@@ -11,10 +11,20 @@ that no other component needs to invent its own storage convention.
 
 ## Status
 
-Design contract only. No `research.db` schema, directory layout, or
-read/write access pattern exists yet. Other component documents (queue,
-retrieval, analysis, ranking, reader) all defer to this document for
-storage location and the SQLite-vs-files split.
+Design contract only within this repository. No `research.db` schema,
+directory layout, or read/write access pattern ships here. Other component
+documents (queue, retrieval, analysis, ranking, reader) all defer to this
+document for storage location and the SQLite-vs-files split.
+
+**External validation:** the underlying persistent volume this layout
+would live on (`/workspace`, backed by the `BigLittleWeights` RunPod
+Network Volume) has been independently verified as accessible and durable
+via RunPod's S3 API — see [`docs/storage/README.md`](../../docs/storage/README.md).
+A `research_jobs.py` prototype has also informally validated project/queue
+row mechanics outside this repository (see
+[`research/queue/README.md`](../queue/README.md)). Neither confirms the
+`research.db` schema or directory layout below has actually been built —
+they remain this document's design, not a shipped result.
 
 ## Responsibilities
 
@@ -83,8 +93,9 @@ checks) has one place to look.
 │       ├── ranking/
 │       │   └── scores.json           # per-source dimension scores,
 │       │                             #   overall score, diversity penalty,
-│       │                             #   selection reason (denormalized;
-│       │                             #   canonical copy lives in SQLite)
+│       │                             #   PRIMARY/SUPPORTING tier, selection
+│       │                             #   reason (denormalized; canonical
+│       │                             #   copy lives in SQLite)
 │       ├── report/
 │       │   └── final-report.md       # (or equivalent) the reader-facing
 │       │                             #   long-form output
@@ -108,7 +119,7 @@ queryable data) is the contract other components should assume.
 | Project metadata (question, user-facing status, created/updated times) | SQLite | Needs to be listed/filtered/sorted for project-list UIs |
 | Source metadata (title, URL, domain, author, dates, retrieval method, discovering query, content file paths, errors) | SQLite | Needs to be queryable (e.g. "all sources for project X," dedup checks) and small/structured per row |
 | Source raw and cleaned content bodies | Files | Potentially large, not something you want bloating a SQLite row; referenced by path from the SQLite metadata row |
-| Ranking dimension scores, overall score, diversity penalty, selection reason | SQLite (canonical), optionally denormalized to a project file for easy inspection | Needs to be queryable per-source and joinable against source metadata |
+| Ranking dimension scores, overall score, diversity penalty, PRIMARY/SUPPORTING tier, selection reason | SQLite (canonical), optionally denormalized to a project file for easy inspection | Needs to be queryable per-source and joinable against source metadata |
 | Pass 1 map, final structured analysis | Files (JSON), pointer/path recorded in SQLite | Structured but potentially large and read as a whole rather than queried field-by-field |
 | Final report | File, pointer/path recorded in SQLite | Rendered as a whole document by the reader, not queried in pieces |
 | Logs | Files | Append-only, not relational data |
@@ -162,6 +173,23 @@ Failed/paused/cancelled projects retain whatever was durably written up to
 the point of that operational state — per
 [`research/queue/README.md`](../queue/README.md), nothing is deleted on
 failure, pause, or cancellation.
+
+## Operational hazards (verified)
+
+- **Never hand-edit a live `research.db` (or any live SQLite file under
+  this layout) over an S3/Windows mount while a worker or the FastAPI
+  process has it open.** SQLite's locking assumptions do not hold reliably
+  across an S3-backed network mount plus a Pod-side process writing
+  concurrently; this risks corrupting the database. Inspect a copy, or
+  inspect while the Pod is stopped. See
+  [`docs/storage/README.md`](../../docs/storage/README.md#live-sqlite-files-never-hand-edit-while-in-use).
+- **Do not treat file permission bits under `/workspace` as an execution
+  trust boundary.** The Network Volume backing `/workspace` does not
+  reliably preserve `chmod`. Anything under this layout meant to be
+  *executed* (not just stored) — the worker code itself — must be synced
+  and hash-verified into `/opt/dre-research` first; see
+  [`research/worker/README.md`](../worker/README.md) and
+  [`docs/storage/README.md`](../../docs/storage/README.md).
 
 ## Failure behavior
 
